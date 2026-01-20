@@ -51,7 +51,6 @@ services:
       - POSTGRES_DB=sentiment
     volumes:
       - timescaledb-data:/var/lib/postgresql/data
-      - ./src/database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     networks:
       - sentiment-network
     restart: unless-stopped

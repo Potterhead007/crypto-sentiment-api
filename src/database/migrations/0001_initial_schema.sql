@@ -27,8 +27,8 @@ CREATE TABLE IF NOT EXISTS assets (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_assets_symbol ON assets(symbol);
-CREATE INDEX idx_assets_coingecko_id ON assets(coingecko_id) WHERE coingecko_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_assets_symbol ON assets(symbol);
+CREATE INDEX IF NOT EXISTS idx_assets_coingecko_id ON assets(coingecko_id) WHERE coingecko_id IS NOT NULL;
 
 -- Entities (exchanges, protocols, influencers, etc.)
 CREATE TABLE IF NOT EXISTS entities (
@@ -40,8 +40,8 @@ CREATE TABLE IF NOT EXISTS entities (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_entities_name_trgm ON entities USING gin(name gin_trgm_ops);
-CREATE INDEX idx_entities_type ON entities(entity_type);
+CREATE INDEX IF NOT EXISTS idx_entities_name_trgm ON entities USING gin(name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
 
 -- =============================================================================
 -- Sentiment Data (Hypertables)
@@ -74,8 +74,8 @@ SELECT create_hypertable('sentiment_raw', 'time',
   if_not_exists => TRUE
 );
 
-CREATE INDEX idx_sentiment_raw_asset_time ON sentiment_raw(asset_id, time DESC);
-CREATE INDEX idx_sentiment_raw_source ON sentiment_raw(source, time DESC);
+CREATE INDEX IF NOT EXISTS idx_sentiment_raw_asset_time ON sentiment_raw(asset_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_sentiment_raw_source ON sentiment_raw(source, time DESC);
 
 -- Aggregated sentiment (1 minute)
 CREATE TABLE IF NOT EXISTS sentiment_aggregated_1m (
@@ -180,8 +180,8 @@ SELECT create_hypertable('onchain_flows', 'time',
   if_not_exists => TRUE
 );
 
-CREATE INDEX idx_onchain_flows_asset ON onchain_flows(asset_id, time DESC);
-CREATE INDEX idx_onchain_flows_type ON onchain_flows(transaction_type, time DESC);
+CREATE INDEX IF NOT EXISTS idx_onchain_flows_asset ON onchain_flows(asset_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_onchain_flows_type ON onchain_flows(transaction_type, time DESC);
 
 -- =============================================================================
 -- Client & Authentication
@@ -198,8 +198,8 @@ CREATE TABLE IF NOT EXISTS clients (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_clients_email ON clients(email);
-CREATE INDEX idx_clients_tier ON clients(tier);
+CREATE INDEX IF NOT EXISTS idx_clients_email ON clients(email);
+CREATE INDEX IF NOT EXISTS idx_clients_tier ON clients(tier);
 
 CREATE TABLE IF NOT EXISTS api_keys (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -215,9 +215,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_api_keys_hash ON api_keys(key_hash);
-CREATE INDEX idx_api_keys_prefix ON api_keys(key_prefix);
-CREATE INDEX idx_api_keys_client ON api_keys(client_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix);
+CREATE INDEX IF NOT EXISTS idx_api_keys_client ON api_keys(client_id);
 
 -- =============================================================================
 -- Audit & Logging
@@ -242,8 +242,8 @@ SELECT create_hypertable('audit_log', 'time',
   if_not_exists => TRUE
 );
 
-CREATE INDEX idx_audit_log_client ON audit_log(client_id, time DESC);
-CREATE INDEX idx_audit_log_action ON audit_log(action, time DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_log_client ON audit_log(client_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action, time DESC);
 
 -- =============================================================================
 -- Compression Policies
