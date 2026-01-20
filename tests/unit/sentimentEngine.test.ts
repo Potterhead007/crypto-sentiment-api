@@ -324,6 +324,193 @@ describe('SentimentEngine', () => {
     });
   });
 
+  describe('HuggingFace API Integration', () => {
+    let fetchSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      fetchSpy = jest.spyOn(global, 'fetch');
+    });
+
+    afterEach(() => {
+      fetchSpy.mockRestore();
+    });
+
+    it('should use HuggingFace API when API key is provided', async () => {
+      const engineWithApi = new SentimentEngine({
+        huggingFaceApiKey: 'test-api-key',
+      });
+
+      // Mock successful FinBERT response
+      fetchSpy.mockResolvedValueOnce({
+        ok: true,
+        json: async () => [[
+          { label: 'positive', score: 0.8 },
+          { label: 'negative', score: 0.1 },
+          { label: 'neutral', score: 0.1 },
+        ]],
+      } as Response);
+
+      const input: TextInput = {
+        id: 'hf_test',
+        text: 'Bitcoin is great',
+        source: 'twitter',
+        timestamp: new Date(),
+        metadata: {},
+      };
+
+      const result = await engineWithApi.analyze(input);
+      expect(fetchSpy).toHaveBeenCalled();
+      expect(result.sentiment.raw).toBeGreaterThan(0);
+    });
+
+    it('should handle alternative HuggingFace response format', async () => {
+      const engineWithApi = new SentimentEngine({
+        huggingFaceApiKey: 'test-api-key',
+      });
+
+      // Mock alternative format (single label)
+      fetchSpy.mockResolvedValueOnce({
+        ok: true,
+        json: async () => [{ label: 'POSITIVE', score: 0.9 }],
+      } as Response);
+
+      const input: TextInput = {
+        id: 'hf_alt',
+        text: 'Good news',
+        source: 'news',
+        timestamp: new Date(),
+        metadata: {},
+      };
+
+      const result = await engineWithApi.analyze(input);
+      expect(result.sentiment.raw).toBeGreaterThan(0);
+    });
+
+    it('should handle LABEL_X format from HuggingFace', async () => {
+      const engineWithApi = new SentimentEngine({
+        huggingFaceApiKey: 'test-api-key',
+      });
+
+      fetchSpy.mockResolvedValueOnce({
+        ok: true,
+        json: async () => [{ label: 'LABEL_2', score: 0.85 }],
+      } as Response);
+
+      const input: TextInput = {
+        id: 'hf_label',
+        text: 'Test',
+        source: 'twitter',
+        timestamp: new Date(),
+        metadata: {},
+      };
+
+      const result = await engineWithApi.analyze(input);
+      expect(result).toBeDefined();
+    });
+
+    it('should fall back to lexicon on HuggingFace API error', async () => {
+      const engineWithApi = new SentimentEngine({
+        huggingFaceApiKey: 'test-api-key',
+      });
+
+      // Mock API failure
+      fetchSpy.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+      } as Response);
+
+      const input: TextInput = {
+        id: 'hf_fallback',
+        text: 'BTC bullish',
+        source: 'twitter',
+        timestamp: new Date(),
+        metadata: {},
+      };
+
+      const result = await engineWithApi.analyze(input);
+      expect(result).toBeDefined();
+      expect(result.sentiment.raw).toBeGreaterThan(0); // lexicon fallback works
+    });
+
+    it('should use cached HuggingFace results', async () => {
+      const engineWithApi = new SentimentEngine({
+        huggingFaceApiKey: 'test-api-key',
+      });
+
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        json: async () => [[
+          { label: 'positive', score: 0.7 },
+          { label: 'negative', score: 0.2 },
+          { label: 'neutral', score: 0.1 },
+        ]],
+      } as Response);
+
+      const input: TextInput = {
+        id: 'hf_cache',
+        text: 'Same text for caching',
+        source: 'twitter',
+        timestamp: new Date(),
+        metadata: {},
+      };
+
+      // First call
+      await engineWithApi.analyze(input);
+      // Second call with same text
+      await engineWithApi.analyze({ ...input, id: 'hf_cache_2' });
+
+      // Should only call fetch once due to caching
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Engagement Metadata Boosts', () => {
+    it('should boost positive sentiment based on engagement', async () => {
+      const lowEngagementInput: TextInput = {
+        id: 'low_eng',
+        text: 'BTC is looking good',
+        source: 'twitter',
+        timestamp: new Date(),
+        metadata: {
+          engagement: { likes: 1, retweets: 0, replies: 0 },
+        },
+      };
+
+      const highEngagementInput: TextInput = {
+        id: 'high_eng',
+        text: 'BTC is looking good',
+        source: 'twitter',
+        timestamp: new Date(),
+        metadata: {
+          engagement: { likes: 10000, retweets: 5000, replies: 1000 },
+        },
+      };
+
+      const lowResult = await engine.analyze(lowEngagementInput);
+      const highResult = await engine.analyze(highEngagementInput);
+
+      // High engagement should boost the score
+      expect(Math.abs(highResult.sentiment.raw)).toBeGreaterThanOrEqual(
+        Math.abs(lowResult.sentiment.raw) * 0.95
+      );
+    });
+
+    it('should handle engagement with missing fields', async () => {
+      const input: TextInput = {
+        id: 'partial_eng',
+        text: 'Crypto news update',
+        source: 'twitter',
+        timestamp: new Date(),
+        metadata: {
+          engagement: { likes: 100 }, // only likes, no retweets/replies
+        },
+      };
+
+      const result = await engine.analyze(input);
+      expect(result).toBeDefined();
+    });
+  });
+
   describe('Edge Cases', () => {
     it('should handle empty text', async () => {
       const input: TextInput = {

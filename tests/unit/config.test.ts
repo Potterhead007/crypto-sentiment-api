@@ -260,6 +260,37 @@ describe('Configuration', () => {
       });
       expect(() => validateConfig(config)).toThrow(/SASL/i);
     });
+
+    it('should reject production config without Redis TLS', () => {
+      const config = createProductionConfig({
+        redis: {
+          ...createProductionConfig().redis,
+          tls: false,
+        },
+      });
+      expect(() => validateConfig(config)).toThrow(/Redis.*TLS/i);
+    });
+
+    it('should warn about production config without Kafka SSL', () => {
+      const config = createProductionConfig({
+        kafka: {
+          ...createProductionConfig().kafka,
+          ssl: false,
+          sasl: undefined,
+        },
+      });
+      expect(() => validateConfig(config)).toThrow(/Kafka.*SSL/i);
+    });
+
+    it('should reject production config with empty JWT secret', () => {
+      const config = createProductionConfig({
+        security: {
+          ...createProductionConfig().security,
+          jwtSecret: '',
+        },
+      });
+      expect(() => validateConfig(config)).toThrow(/JWT/i);
+    });
   });
 
   describe('Port Validation', () => {
