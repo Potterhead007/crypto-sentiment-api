@@ -142,8 +142,9 @@ spec:
 
       containers:
         - name: sentiment-api
-          image: sentiment-api:latest
-          imagePullPolicy: Always
+          # Image tag should be set by CI/CD pipeline (e.g., git SHA or semver)
+          image: sentiment-api:${IMAGE_TAG:-v1.0.0}
+          imagePullPolicy: IfNotPresent
 
           ports:
             - name: http

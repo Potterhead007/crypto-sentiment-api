@@ -131,6 +131,11 @@ const config: Config = {
     clientId: 'sentiment-api',
     groupId: 'sentiment-api-group',
     ssl: process.env.KAFKA_SSL === 'true',
+    sasl: process.env.KAFKA_SASL_USERNAME && process.env.KAFKA_SASL_PASSWORD ? {
+      mechanism: (process.env.KAFKA_SASL_MECHANISM as 'plain' | 'scram-sha-256' | 'scram-sha-512') || 'scram-sha-512',
+      username: process.env.KAFKA_SASL_USERNAME,
+      password: process.env.KAFKA_SASL_PASSWORD,
+    } : undefined,
     topics: {
       rawSocial: 'raw-social',
       rawNews: 'raw-news',
@@ -261,7 +266,18 @@ export function validateConfig(cfg: Config): void {
 
     // Redis validation
     if (!cfg.redis.password) {
-      errors.push('Redis password should be set in production');
+      errors.push('CRITICAL: Redis password must be set in production (REDIS_PASSWORD)');
+    }
+    if (!cfg.redis.tls) {
+      errors.push('WARNING: Redis TLS should be enabled in production (REDIS_TLS=true)');
+    }
+
+    // Kafka validation
+    if (cfg.kafka.ssl && !cfg.kafka.sasl) {
+      errors.push('CRITICAL: Kafka SASL authentication must be configured when SSL is enabled in production');
+    }
+    if (!cfg.kafka.ssl) {
+      errors.push('WARNING: Kafka SSL should be enabled in production (KAFKA_SSL=true)');
     }
   }
 

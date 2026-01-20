@@ -7,6 +7,7 @@ import express, { Express, Request, Response, NextFunction } from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
+import crypto from 'crypto';
 import { createServer, Server } from 'http';
 import { WebSocketServer } from 'ws';
 import Redis from 'ioredis';
@@ -244,11 +245,46 @@ class Application {
   // ---------------------------------------------------------------------------
 
   private setupMiddleware(): void {
-    // Security middleware
-    this.app.use(helmet());
+    // Security middleware with explicit configuration
+    this.app.use(helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: ["'self'"],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          imgSrc: ["'self'", "data:"],
+          connectSrc: ["'self'"],
+          fontSrc: ["'self'"],
+          objectSrc: ["'none'"],
+          mediaSrc: ["'self'"],
+          frameSrc: ["'none'"],
+        },
+      },
+      crossOriginEmbedderPolicy: true,
+      crossOriginOpenerPolicy: { policy: 'same-origin' },
+      crossOriginResourcePolicy: { policy: 'same-origin' },
+      dnsPrefetchControl: { allow: false },
+      frameguard: { action: 'deny' },
+      hsts: {
+        maxAge: 31536000, // 1 year
+        includeSubDomains: true,
+        preload: true,
+      },
+      ieNoOpen: true,
+      noSniff: true,
+      originAgentCluster: true,
+      permittedCrossDomainPolicies: { permittedPolicies: 'none' },
+      referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+      xssFilter: true,
+    }));
+
     this.app.use(cors({
       origin: config.security.corsOrigins,
       credentials: true,
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Request-Id'],
+      exposedHeaders: ['X-Request-Id', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
+      maxAge: 86400, // 24 hours
     }));
 
     // Compression
@@ -270,12 +306,40 @@ class Application {
       this.app.use(createRateLimitMiddleware({
         redis: this.redis,
         getClientContext: async (req: Request) => {
-          // In production, extract from JWT or API key
           const apiKey = req.headers[config.security.apiKeyHeader.toLowerCase()] as string;
-          return {
-            clientId: apiKey || 'anonymous',
-            tier: 'professional', // Default tier, would be looked up from database
-          };
+
+          // Anonymous users get lowest tier
+          if (!apiKey || !apiKey.startsWith('sk_') || apiKey.length < 32) {
+            return { clientId: 'anonymous', tier: 'professional' as const };
+          }
+
+          // Hash the API key and lookup in database
+          const keyHash = crypto
+            .createHash('sha256')
+            .update(apiKey)
+            .digest('hex');
+          const keyPrefix = apiKey.substring(0, 12);
+
+          try {
+            const result = await this.pool.query<{ client_id: string; tier: string; is_active: boolean }>(`
+              SELECT ak.client_id, c.tier, ak.is_active
+              FROM api_keys ak
+              JOIN clients c ON ak.client_id = c.id
+              WHERE ak.key_hash = $1 AND ak.key_prefix = $2 AND ak.is_active = true AND c.is_active = true
+            `, [keyHash, keyPrefix]);
+
+            if (result.rows.length > 0) {
+              const { client_id, tier } = result.rows[0];
+              // Attach client info to request for downstream use
+              (req as any).clientId = client_id;
+              (req as any).clientTier = tier;
+              return { clientId: client_id, tier: tier as 'professional' | 'institutional' | 'enterprise' | 'strategic' };
+            }
+          } catch (error) {
+            console.error('Rate limit client lookup error:', (error as Error).message);
+          }
+
+          return { clientId: 'anonymous', tier: 'professional' as const };
         },
         skip: (req: Request) => {
           // Skip rate limiting for health checks
@@ -331,9 +395,18 @@ class Application {
           },
         });
       } catch (error) {
+        // Log full error for debugging but don't expose to client
+        console.error('Health check failed:', error);
+
+        // Determine which component failed without exposing details
+        const failedComponent = (error as Error).message?.includes('ECONNREFUSED')
+          ? 'connectivity'
+          : 'unknown';
+
         res.status(503).json({
           status: 'not_ready',
-          error: (error as Error).message,
+          error: 'One or more health checks failed',
+          hint: config.server.env !== 'production' ? failedComponent : undefined,
         });
       }
     });

@@ -61,7 +61,7 @@ jobs:
           --health-retries 5
 
       postgres:
-        image: timescale/timescaledb:latest-pg15
+        image: timescale/timescaledb:2.13.1-pg15
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test

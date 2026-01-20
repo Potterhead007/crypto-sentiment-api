@@ -13,6 +13,7 @@
 import { Request, Response, NextFunction, Router } from 'express';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
+import { Pool } from 'pg';
 
 // =============================================================================
 // TYPES & INTERFACES
@@ -707,6 +708,7 @@ export interface AuthMiddlewareOptions {
   config: SSOConfig;
   sessionManager: SessionManager;
   tokenManager: TokenManager;
+  dbPool: Pool;
   getUserById?: (userId: string) => Promise<any>;
   getOrganizationConfig?: (orgId: string) => Promise<any>;
 }
@@ -816,34 +818,105 @@ async function authenticateApiKey(
   apiKey: string,
   options: AuthMiddlewareOptions
 ): Promise<AuthenticatedUser | null> {
-  // In production, look up API key in database
-  // This is a placeholder implementation
-  if (!apiKey.startsWith('sk_')) {
+  // Validate API key format (must start with sk_)
+  if (!apiKey.startsWith('sk_') || apiKey.length < 32) {
     return null;
   }
 
-  // Create pseudo-session for API key auth
-  const session = options.sessionManager.createSession(
-    apiKey,
-    'default',
-    'api_key',
-    '0.0.0.0',
-    'api-client'
-  );
+  // Hash the API key for database lookup (use SHA-256)
+  const keyHash = crypto
+    .createHash('sha256')
+    .update(apiKey)
+    .digest('hex');
 
-  return {
-    id: apiKey,
-    email: 'api@client.com',
-    organizationId: 'default',
-    clientId: apiKey,
-    tier: 'professional',
-    roles: ['api_user'],
-    groups: [],
-    authProvider: 'api_key',
-    sessionId: session.id,
-    issuedAt: new Date(),
-    expiresAt: session.expiresAt,
-  };
+  // Extract prefix for quick lookup (first 12 chars including 'sk_')
+  const keyPrefix = apiKey.substring(0, 12);
+
+  try {
+    // Query database for API key and associated client
+    const result = await options.dbPool.query<{
+      key_id: string;
+      client_id: string;
+      scopes: string[];
+      is_active: boolean;
+      expires_at: Date | null;
+      email: string;
+      organization_id: string;
+      tier: string;
+      client_name: string;
+      client_is_active: boolean;
+    }>(`
+      SELECT
+        ak.id as key_id,
+        ak.client_id,
+        ak.scopes,
+        ak.is_active,
+        ak.expires_at,
+        c.email,
+        c.organization_id,
+        c.tier,
+        c.name as client_name,
+        c.is_active as client_is_active
+      FROM api_keys ak
+      JOIN clients c ON ak.client_id = c.id
+      WHERE ak.key_hash = $1 AND ak.key_prefix = $2
+    `, [keyHash, keyPrefix]);
+
+    if (result.rows.length === 0) {
+      return null;
+    }
+
+    const keyData = result.rows[0];
+
+    // Validate key is active
+    if (!keyData.is_active) {
+      return null;
+    }
+
+    // Validate client is active
+    if (!keyData.client_is_active) {
+      return null;
+    }
+
+    // Validate expiration
+    if (keyData.expires_at && new Date() > new Date(keyData.expires_at)) {
+      return null;
+    }
+
+    // Update last_used_at timestamp (fire and forget)
+    options.dbPool.query(
+      'UPDATE api_keys SET last_used_at = NOW() WHERE id = $1',
+      [keyData.key_id]
+    ).catch(() => { /* ignore errors on usage update */ });
+
+    // Create session for API key auth
+    const session = options.sessionManager.createSession(
+      keyData.client_id,
+      keyData.organization_id,
+      'api_key',
+      '0.0.0.0',
+      'api-client'
+    );
+
+    return {
+      id: keyData.client_id,
+      email: keyData.email,
+      displayName: keyData.client_name,
+      organizationId: keyData.organization_id,
+      clientId: keyData.client_id,
+      tier: keyData.tier,
+      roles: keyData.scopes || ['api_user'],
+      groups: [],
+      authProvider: 'api_key',
+      sessionId: session.id,
+      issuedAt: new Date(),
+      expiresAt: session.expiresAt,
+    };
+  } catch (error) {
+    // Log error but don't expose details
+    console.error('API key authentication error:', (error as Error).message);
+    return null;
+  }
 }
 
 function isPublicEndpoint(path: string): boolean {

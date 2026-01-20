@@ -59,6 +59,7 @@ export interface SentimentResult {
   id: string;
   inputId: string;
   timestamp: Date;
+  source: DataSource;
   sentiment: SentimentScore;
   entities: ExtractedEntity[];
   topics: ExtractedTopic[];
@@ -373,6 +374,7 @@ export class SentimentEngine extends EventEmitter {
       id: `sent_${crypto.randomBytes(8).toString('hex')}`,
       inputId: input.id,
       timestamp: new Date(),
+      source: input.source,
       sentiment: {
         raw: ensembleScore,
         normalized: (ensembleScore + 1) / 2,
@@ -961,11 +963,10 @@ export class SentimentEngine extends EventEmitter {
   }
 
   private groupBySource(results: SentimentResult[]): Record<string, SentimentResult[]> {
-    // Note: We'd need to track source in the result - adding placeholder logic
     const grouped: Record<string, SentimentResult[]> = {};
 
     for (const result of results) {
-      const source = 'twitter'; // Placeholder - would come from input tracking
+      const source = result.source;
       if (!grouped[source]) {
         grouped[source] = [];
       }
