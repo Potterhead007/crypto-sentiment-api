@@ -13,7 +13,11 @@
     "test:coverage": "jest --coverage",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "migrate": "ts-node src/database/migrator.ts migrate",
+    "migrate:rollback": "ts-node src/database/migrator.ts rollback",
+    "migrate:status": "ts-node src/database/migrator.ts status",
+    "migrate:create": "ts-node src/database/migrator.ts create"
   },
   "keywords": [
     "cryptocurrency",
@@ -42,7 +46,9 @@
     "compression": "^1.7.4",
     "jsonwebtoken": "^9.0.2",
     "uuid": "^9.0.1",
-    "zod": "^3.22.4"
+    "zod": "^3.22.4",
+    "axios": "^1.6.5",
+    "rss-parser": "^3.13.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

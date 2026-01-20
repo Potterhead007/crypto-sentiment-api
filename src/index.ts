@@ -10,13 +10,66 @@ import compression from 'compression';
 import { createServer, Server } from 'http';
 import { WebSocketServer } from 'ws';
 import Redis from 'ioredis';
+import { Pool } from 'pg';
+import { Registry, collectDefaultMetrics, Counter, Histogram, Gauge } from 'prom-client';
 
 import config, { validateConfig } from './config/default';
 import { createRateLimitMiddleware, WebSocketConnectionLimiter } from './middleware/rateLimiter';
 import { SessionManager } from './websocket/reconnectionProtocol';
+import { SentimentEngine } from './nlp/sentimentEngine';
+import { AggregationPipeline, createPipeline } from './services/aggregationPipeline';
+import { DatabaseMigrator } from './database/migrator';
 
 // =============================================================================
 // APPLICATION SETUP
+// =============================================================================
+
+// =============================================================================
+// PROMETHEUS METRICS
+// =============================================================================
+
+const metricsRegistry = new Registry();
+collectDefaultMetrics({ register: metricsRegistry });
+
+// These metrics are registered with Prometheus and exposed via /metrics endpoint
+// They can be used throughout the application for instrumentation
+new Counter({
+  name: 'http_requests_total',
+  help: 'Total number of HTTP requests',
+  labelNames: ['method', 'endpoint', 'status', 'tier'],
+  registers: [metricsRegistry],
+});
+
+new Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'HTTP request duration in seconds',
+  labelNames: ['method', 'endpoint'],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [metricsRegistry],
+});
+
+new Gauge({
+  name: 'websocket_connections_active',
+  help: 'Number of active WebSocket connections',
+  registers: [metricsRegistry],
+});
+
+const sentimentAnalysisTotal = new Counter({
+  name: 'sentiment_analysis_total',
+  help: 'Total sentiment analyses performed',
+  labelNames: ['source', 'asset'],
+  registers: [metricsRegistry],
+});
+
+const datasourceHealth = new Gauge({
+  name: 'datasource_health',
+  help: 'Health status of data sources (1=up, 0=down)',
+  labelNames: ['source'],
+  registers: [metricsRegistry],
+});
+
+// =============================================================================
+// APPLICATION CLASS
 // =============================================================================
 
 class Application {
@@ -24,8 +77,11 @@ class Application {
   private server: Server;
   private wss: WebSocketServer;
   private redis: Redis;
+  private pool: Pool;
   private sessionManager: SessionManager;
   private wsConnectionLimiter: WebSocketConnectionLimiter;
+  private sentimentEngine: SentimentEngine;
+  private pipeline: AggregationPipeline | null = null;
 
   constructor() {
     // Validate configuration
@@ -42,6 +98,25 @@ class Application {
       password: config.redis.password,
       keyPrefix: config.redis.keyPrefix,
       retryStrategy: (times) => Math.min(times * 50, 2000),
+    });
+
+    // Initialize PostgreSQL
+    this.pool = new Pool({
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT || '5432'),
+      database: process.env.DB_NAME || 'sentiment',
+      user: process.env.DB_USER || 'sentiment',
+      password: process.env.DB_PASSWORD || '',
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
+    });
+
+    // Initialize NLP Sentiment Engine
+    this.sentimentEngine = new SentimentEngine({
+      useCryptoLexicon: true,
+      enableEmotionAnalysis: true,
+      confidenceMethod: 'bca_bootstrap',
     });
 
     // Initialize WebSocket
@@ -117,6 +192,12 @@ class Application {
   // ---------------------------------------------------------------------------
 
   private setupRoutes(): void {
+    // Prometheus metrics endpoint
+    this.app.get('/metrics', async (_req: Request, res: Response) => {
+      res.set('Content-Type', metricsRegistry.contentType);
+      res.send(await metricsRegistry.metrics());
+    });
+
     // Health check endpoints
     this.app.get('/health', (_req: Request, res: Response) => {
       res.json({
@@ -132,12 +213,23 @@ class Application {
         // Check Redis
         await this.redis.ping();
 
+        // Check PostgreSQL
+        await this.pool.query('SELECT 1');
+
+        // Check NLP engine
+        const nlpReady = this.sentimentEngine.isReady();
+
+        // Check pipeline
+        const pipelineHealth = this.pipeline ? await this.pipeline.healthCheck() : { healthy: false, components: {} };
+
         res.json({
           status: 'ready',
           timestamp: new Date().toISOString(),
           components: {
             redis: { status: 'healthy' },
-            // Add other component checks
+            postgres: { status: 'healthy' },
+            nlp: { status: nlpReady ? 'healthy' : 'degraded' },
+            pipeline: pipelineHealth,
           },
         });
       } catch (error) {
@@ -152,59 +244,258 @@ class Application {
       res.json({ status: 'alive' });
     });
 
-    // API v1 routes
+    // API v1 routes - Real-time sentiment
     this.app.get('/v1/sentiment/:asset', async (req: Request, res: Response) => {
+      const startTime = Date.now();
       const { asset } = req.params;
 
-      // Placeholder - would fetch from sentiment engine
-      res.json({
-        asset: asset.toUpperCase(),
-        timestamp: new Date().toISOString(),
-        sentiment_score: {
-          composite: 0.72,
-          scale: '0-1 normalized',
-        },
-        confidence: {
-          level: 0.89,
-          interval_95: [0.68, 0.76],
-        },
-        // ... full schema as defined in spec
-      });
-    });
+      try {
+        // Query from database
+        const result = await this.pool.query<{
+          sentiment_score: number;
+          magnitude: number;
+          confidence_score: number;
+          confidence_lower: number;
+          confidence_upper: number;
+          mention_count: number;
+          avg_emotion_fear: number;
+          avg_emotion_greed: number;
+          avg_emotion_uncertainty: number;
+          avg_emotion_optimism: number;
+        }>(
+          `SELECT
+            sentiment_score, magnitude, confidence_score,
+            confidence_lower, confidence_upper, mention_count,
+            avg_emotion_fear, avg_emotion_greed,
+            avg_emotion_uncertainty, avg_emotion_optimism
+          FROM sentiment_aggregated_1h sa
+          JOIN assets a ON sa.asset_id = a.id
+          WHERE a.symbol = $1
+          ORDER BY time DESC
+          LIMIT 1`,
+          [asset.toUpperCase()]
+        );
 
-    this.app.get('/v1/sentiment', async (req: Request, res: Response) => {
-      const assets = (req.query.assets as string)?.split(',') || ['BTC', 'ETH'];
+        if (result.rows.length === 0) {
+          res.status(404).json({
+            error: {
+              code: 'ASSET_NOT_FOUND',
+              message: `No sentiment data found for asset: ${asset}`,
+            },
+          });
+          return;
+        }
 
-      res.json({
-        data: assets.map(asset => ({
+        const data = result.rows[0];
+        sentimentAnalysisTotal.inc({ source: 'api', asset: asset.toUpperCase() });
+
+        res.json({
           asset: asset.toUpperCase(),
           timestamp: new Date().toISOString(),
           sentiment_score: {
-            composite: Math.random() * 0.4 + 0.5, // Placeholder
+            composite: data.sentiment_score,
+            magnitude: data.magnitude,
+            scale: '-1 to 1 normalized',
           },
-        })),
-        meta: {
-          count: assets.length,
-          timestamp: new Date().toISOString(),
-        },
-      });
+          confidence: {
+            level: data.confidence_score,
+            interval_95: [data.confidence_lower, data.confidence_upper],
+          },
+          emotions: {
+            fear: data.avg_emotion_fear,
+            greed: data.avg_emotion_greed,
+            uncertainty: data.avg_emotion_uncertainty,
+            optimism: data.avg_emotion_optimism,
+          },
+          volume: {
+            mention_count: data.mention_count,
+          },
+          meta: {
+            query_time_ms: Date.now() - startTime,
+          },
+        });
+      } catch (error) {
+        console.error('Error fetching sentiment:', error);
+        res.status(500).json({
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: 'Failed to fetch sentiment data',
+          },
+        });
+      }
+    });
+
+    this.app.get('/v1/sentiment', async (req: Request, res: Response) => {
+      const startTime = Date.now();
+      const assets = (req.query.assets as string)?.split(',') || ['BTC', 'ETH'];
+
+      try {
+        const result = await this.pool.query<{
+          symbol: string;
+          sentiment_score: number;
+          confidence_score: number;
+          mention_count: number;
+        }>(
+          `SELECT
+            a.symbol,
+            sa.sentiment_score,
+            sa.confidence_score,
+            sa.mention_count
+          FROM sentiment_aggregated_1h sa
+          JOIN assets a ON sa.asset_id = a.id
+          WHERE a.symbol = ANY($1)
+          AND sa.time = (
+            SELECT MAX(time) FROM sentiment_aggregated_1h
+            WHERE asset_id = sa.asset_id
+          )`,
+          [assets.map(a => a.toUpperCase())]
+        );
+
+        res.json({
+          data: result.rows.map(row => ({
+            asset: row.symbol,
+            timestamp: new Date().toISOString(),
+            sentiment_score: {
+              composite: row.sentiment_score,
+            },
+            confidence: {
+              level: row.confidence_score,
+            },
+            volume: {
+              mention_count: row.mention_count,
+            },
+          })),
+          meta: {
+            count: result.rows.length,
+            timestamp: new Date().toISOString(),
+            query_time_ms: Date.now() - startTime,
+          },
+        });
+      } catch (error) {
+        console.error('Error fetching bulk sentiment:', error);
+        res.status(500).json({
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: 'Failed to fetch sentiment data',
+          },
+        });
+      }
     });
 
     // Historical endpoint
     this.app.get('/v1/historical', async (req: Request, res: Response) => {
+      const startTime = Date.now();
       const { asset, start_time, end_time, interval } = req.query;
 
-      res.json({
-        asset,
-        start_time,
-        end_time,
-        interval,
-        data: [], // Placeholder
-        meta: {
-          count: 0,
-          query_time_ms: 45,
-        },
-      });
+      try {
+        // Determine which table to query based on interval
+        let table = 'sentiment_aggregated_1h';
+        if (interval === '1m') table = 'sentiment_aggregated_1m';
+        if (interval === '1d') table = 'sentiment_aggregated_1d';
+
+        const result = await this.pool.query(
+          `SELECT
+            time,
+            sentiment_score,
+            magnitude,
+            confidence_score,
+            mention_count,
+            positive_count,
+            negative_count,
+            neutral_count
+          FROM ${table} sa
+          JOIN assets a ON sa.asset_id = a.id
+          WHERE a.symbol = $1
+          AND time >= $2
+          AND time <= $3
+          ORDER BY time ASC`,
+          [
+            (asset as string).toUpperCase(),
+            new Date(start_time as string),
+            new Date(end_time as string),
+          ]
+        );
+
+        res.json({
+          asset,
+          start_time,
+          end_time,
+          interval,
+          data: result.rows.map(row => ({
+            timestamp: row.time,
+            sentiment_score: row.sentiment_score,
+            magnitude: row.magnitude,
+            confidence: row.confidence_score,
+            mention_count: row.mention_count,
+            breakdown: {
+              positive: row.positive_count,
+              negative: row.negative_count,
+              neutral: row.neutral_count,
+            },
+          })),
+          meta: {
+            count: result.rows.length,
+            query_time_ms: Date.now() - startTime,
+          },
+        });
+      } catch (error) {
+        console.error('Error fetching historical data:', error);
+        res.status(500).json({
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: 'Failed to fetch historical data',
+          },
+        });
+      }
+    });
+
+    // Real-time analysis endpoint
+    this.app.post('/v1/analyze', async (req: Request, res: Response) => {
+      const startTime = Date.now();
+      const { text, source } = req.body;
+
+      if (!text) {
+        res.status(400).json({
+          error: {
+            code: 'INVALID_REQUEST',
+            message: 'Text field is required',
+          },
+        });
+        return;
+      }
+
+      try {
+        const result = await this.sentimentEngine.analyze({
+          id: `analyze_${Date.now()}`,
+          text,
+          source: source || 'news',
+          timestamp: new Date(),
+          metadata: {},
+        });
+
+        res.json({
+          sentiment: {
+            score: result.sentiment.raw,
+            normalized: result.sentiment.normalized,
+            classification: result.sentiment.label,
+          },
+          confidence: result.sentiment.confidence,
+          emotions: result.sentiment.emotions,
+          entities: result.entities,
+          meta: {
+            model_version: result.modelInfo.modelVersion,
+            processing_time_ms: Date.now() - startTime,
+          },
+        });
+      } catch (error) {
+        console.error('Error analyzing text:', error);
+        res.status(500).json({
+          error: {
+            code: 'ANALYSIS_FAILED',
+            message: 'Failed to analyze text',
+          },
+        });
+      }
     });
 
     // Metadata endpoint
@@ -215,6 +506,62 @@ class Application {
         methodology_version: '2.1.0',
         last_updated: '2026-01-19',
         changelog_url: 'https://docs.sentiment-api.io/changelog',
+      });
+    });
+
+    // Assets endpoint
+    this.app.get('/v1/assets', async (_req: Request, res: Response) => {
+      try {
+        const result = await this.pool.query<{
+          symbol: string;
+          name: string;
+          asset_type: string;
+        }>(
+          `SELECT symbol, name, asset_type FROM assets WHERE is_active = true ORDER BY symbol`
+        );
+
+        res.json({
+          data: result.rows,
+          meta: {
+            count: result.rows.length,
+          },
+        });
+      } catch (error) {
+        console.error('Error fetching assets:', error);
+        res.status(500).json({
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: 'Failed to fetch assets',
+          },
+        });
+      }
+    });
+
+    // Pipeline metrics endpoint
+    this.app.get('/v1/pipeline/status', async (_req: Request, res: Response) => {
+      if (!this.pipeline) {
+        res.status(503).json({
+          error: {
+            code: 'PIPELINE_NOT_RUNNING',
+            message: 'Aggregation pipeline is not running',
+          },
+        });
+        return;
+      }
+
+      const metrics = this.pipeline.getMetrics();
+      const health = await this.pipeline.healthCheck();
+
+      res.json({
+        status: health.healthy ? 'running' : 'degraded',
+        components: health.components,
+        metrics: {
+          items_received: metrics.itemsReceived,
+          items_processed: metrics.itemsProcessed,
+          items_failed: metrics.itemsFailed,
+          avg_processing_time_ms: metrics.avgProcessingTimeMs,
+          last_processed_at: metrics.lastProcessedAt,
+        },
       });
     });
   }
@@ -387,6 +734,42 @@ class Application {
   // ---------------------------------------------------------------------------
 
   async start(): Promise<void> {
+    console.log('[Application] Starting Crypto Sentiment API...');
+
+    // Run database migrations
+    if (process.env.RUN_MIGRATIONS !== 'false') {
+      console.log('[Application] Running database migrations...');
+      const migrator = new DatabaseMigrator();
+      const migrationResult = await migrator.migrate();
+      await migrator.close();
+
+      if (!migrationResult.success) {
+        console.error('[Application] Migration failed:', migrationResult.error);
+        if (process.env.REQUIRE_MIGRATIONS !== 'false') {
+          throw new Error(`Migration failed: ${migrationResult.error}`);
+        }
+      } else if (migrationResult.migrationsRun.length > 0) {
+        console.log(`[Application] Ran ${migrationResult.migrationsRun.length} migration(s)`);
+      } else {
+        console.log('[Application] Database is up to date');
+      }
+    }
+
+    // Start aggregation pipeline in production
+    if (config.server.env === 'production' || process.env.START_PIPELINE === 'true') {
+      console.log('[Application] Starting aggregation pipeline...');
+      this.pipeline = createPipeline();
+      await this.pipeline.start();
+
+      // Update datasource health metrics
+      this.pipeline.on('datasourceHealth', (status: Record<string, boolean>) => {
+        for (const [source, healthy] of Object.entries(status)) {
+          datasourceHealth.set({ source }, healthy ? 1 : 0);
+        }
+      });
+    }
+
+    // Start HTTP server
     return new Promise((resolve) => {
       this.server.listen(config.server.port, config.server.host, () => {
         console.log(`
@@ -395,8 +778,10 @@ class Application {
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║  Server:     http://${config.server.host}:${config.server.port}                                          ║
 ║  WebSocket:  ws://${config.server.host}:${config.server.port}${config.websocket.path}                           ║
+║  Metrics:    http://${config.server.host}:${config.server.port}/metrics                                  ║
 ║  Environment: ${config.server.env.padEnd(12)}                                             ║
 ║  Region:     ${config.server.region.padEnd(12)}                                             ║
+║  Pipeline:   ${(this.pipeline ? 'Running' : 'Disabled').padEnd(12)}                                             ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
         `);
         resolve();
@@ -405,11 +790,23 @@ class Application {
   }
 
   async stop(): Promise<void> {
+    console.log('[Application] Shutting down...');
+
+    // Stop pipeline
+    if (this.pipeline) {
+      await this.pipeline.stop();
+    }
+
+    // Close connections
     return new Promise((resolve) => {
       this.wss.close();
       this.redis.quit();
+      this.pool.end();
       this.sessionManager.destroy();
-      this.server.close(() => resolve());
+      this.server.close(() => {
+        console.log('[Application] Shutdown complete');
+        resolve();
+      });
     });
   }
 }
