@@ -13,12 +13,55 @@ import Redis from 'ioredis';
 import { Pool } from 'pg';
 import { Registry, collectDefaultMetrics, Counter, Histogram, Gauge } from 'prom-client';
 
+import { z } from 'zod';
 import config, { validateConfig } from './config/default';
 import { createRateLimitMiddleware, WebSocketConnectionLimiter } from './middleware/rateLimiter';
 import { SessionManager } from './websocket/reconnectionProtocol';
 import { SentimentEngine } from './nlp/sentimentEngine';
 import { AggregationPipeline, createPipeline } from './services/aggregationPipeline';
 import { DatabaseMigrator } from './database/migrator';
+
+// =============================================================================
+// INPUT VALIDATION SCHEMAS
+// =============================================================================
+
+const assetSymbolSchema = z.string()
+  .min(1, 'Asset symbol required')
+  .max(10, 'Asset symbol too long')
+  .regex(/^[A-Z0-9]+$/i, 'Invalid asset symbol format')
+  .transform(s => s.toUpperCase());
+
+const assetsQuerySchema = z.string()
+  .transform(s => s.split(',').map(a => a.trim().toUpperCase()))
+  .pipe(z.array(assetSymbolSchema).min(1).max(50));
+
+const intervalSchema = z.enum(['1m', '1h', '1d']);
+
+const dateStringSchema = z.string().refine(
+  (s) => !isNaN(Date.parse(s)),
+  { message: 'Invalid date format' }
+);
+
+const historicalQuerySchema = z.object({
+  asset: assetSymbolSchema,
+  start_time: dateStringSchema,
+  end_time: dateStringSchema,
+  interval: intervalSchema.default('1h'),
+  limit: z.coerce.number().int().min(1).max(10000).default(1000),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+const analyzeBodySchema = z.object({
+  text: z.string().min(1, 'Text is required').max(10000, 'Text exceeds 10000 character limit'),
+  source: z.enum(['twitter', 'reddit', 'news', 'discord', 'telegram', 'onchain']).default('news'),
+});
+
+// Valid table mapping for historical queries (prevents SQL injection)
+const INTERVAL_TABLE_MAP: Record<string, string> = {
+  '1m': 'sentiment_aggregated_1m',
+  '1h': 'sentiment_aggregated_1h',
+  '1d': 'sentiment_aggregated_1d',
+} as const;
 
 // =============================================================================
 // APPLICATION SETUP
@@ -65,6 +108,61 @@ const datasourceHealth = new Gauge({
   name: 'datasource_health',
   help: 'Health status of data sources (1=up, 0=down)',
   labelNames: ['source'],
+  registers: [metricsRegistry],
+});
+
+// Data freshness tracking
+const sentimentLastProcessed = new Gauge({
+  name: 'sentiment_last_processed_timestamp',
+  help: 'Unix timestamp of last processed sentiment for each asset',
+  labelNames: ['asset'],
+  registers: [metricsRegistry],
+});
+
+// Rate limit monitoring
+const datasourceRateLimitUsage = new Gauge({
+  name: 'datasource_rate_limit_usage',
+  help: 'Current rate limit usage percentage (0-1)',
+  labelNames: ['source'],
+  registers: [metricsRegistry],
+});
+
+// Sentiment score tracking for anomaly detection
+const sentimentScoreGauge = new Gauge({
+  name: 'sentiment_score',
+  help: 'Current sentiment score for each asset (-1 to 1)',
+  labelNames: ['asset', 'source'],
+  registers: [metricsRegistry],
+});
+
+// Mention volume tracking
+const sentimentMentionsTotal = new Counter({
+  name: 'sentiment_mentions_total',
+  help: 'Total number of mentions per asset and source',
+  labelNames: ['asset', 'source'],
+  registers: [metricsRegistry],
+});
+
+// Pipeline processing metrics
+const pipelineProcessedTotal = new Counter({
+  name: 'pipeline_processed_total',
+  help: 'Total items processed by the pipeline',
+  labelNames: ['status'],
+  registers: [metricsRegistry],
+});
+
+const pipelineQueueSize = new Gauge({
+  name: 'pipeline_queue_size',
+  help: 'Current size of the processing queue',
+  registers: [metricsRegistry],
+});
+
+// Database query metrics
+const dbQueryDuration = new Histogram({
+  name: 'db_query_duration_seconds',
+  help: 'Database query duration in seconds',
+  labelNames: ['query_type'],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
   registers: [metricsRegistry],
 });
 
@@ -247,7 +345,20 @@ class Application {
     // API v1 routes - Real-time sentiment
     this.app.get('/v1/sentiment/:asset', async (req: Request, res: Response) => {
       const startTime = Date.now();
-      const { asset } = req.params;
+
+      // Validate asset parameter
+      const validation = assetSymbolSchema.safeParse(req.params.asset);
+      if (!validation.success) {
+        res.status(400).json({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Invalid asset symbol',
+            details: validation.error.errors,
+          },
+        });
+        return;
+      }
+      const asset = validation.data;
 
       try {
         // Query from database
@@ -327,7 +438,25 @@ class Application {
 
     this.app.get('/v1/sentiment', async (req: Request, res: Response) => {
       const startTime = Date.now();
-      const assets = (req.query.assets as string)?.split(',') || ['BTC', 'ETH'];
+
+      // Validate assets query parameter
+      let assets: string[];
+      if (req.query.assets) {
+        const validation = assetsQuerySchema.safeParse(req.query.assets);
+        if (!validation.success) {
+          res.status(400).json({
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'Invalid assets parameter',
+              details: validation.error.errors,
+            },
+          });
+          return;
+        }
+        assets = validation.data;
+      } else {
+        assets = ['BTC', 'ETH']; // Default assets
+      }
 
       try {
         const result = await this.pool.query<{
@@ -382,17 +511,41 @@ class Application {
       }
     });
 
-    // Historical endpoint
+    // Historical endpoint with validated inputs
     this.app.get('/v1/historical', async (req: Request, res: Response) => {
       const startTime = Date.now();
-      const { asset, start_time, end_time, interval } = req.query;
+
+      // Validate all query parameters
+      const validation = historicalQuerySchema.safeParse(req.query);
+      if (!validation.success) {
+        res.status(400).json({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Invalid query parameters',
+            details: validation.error.errors.map(e => ({
+              field: e.path.join('.'),
+              message: e.message,
+            })),
+          },
+        });
+        return;
+      }
+
+      const { asset, start_time, end_time, interval, limit, offset } = validation.data;
+
+      // Safe table lookup - prevents SQL injection
+      const table = INTERVAL_TABLE_MAP[interval];
+      if (!table) {
+        res.status(400).json({
+          error: {
+            code: 'INVALID_INTERVAL',
+            message: `Invalid interval. Must be one of: ${Object.keys(INTERVAL_TABLE_MAP).join(', ')}`,
+          },
+        });
+        return;
+      }
 
       try {
-        // Determine which table to query based on interval
-        let table = 'sentiment_aggregated_1h';
-        if (interval === '1m') table = 'sentiment_aggregated_1m';
-        if (interval === '1d') table = 'sentiment_aggregated_1d';
-
         const result = await this.pool.query(
           `SELECT
             time,
@@ -408,11 +561,14 @@ class Application {
           WHERE a.symbol = $1
           AND time >= $2
           AND time <= $3
-          ORDER BY time ASC`,
+          ORDER BY time ASC
+          LIMIT $4 OFFSET $5`,
           [
-            (asset as string).toUpperCase(),
-            new Date(start_time as string),
-            new Date(end_time as string),
+            asset,
+            new Date(start_time),
+            new Date(end_time),
+            limit,
+            offset,
           ]
         );
 
@@ -433,8 +589,13 @@ class Application {
               neutral: row.neutral_count,
             },
           })),
-          meta: {
+          pagination: {
+            limit,
+            offset,
             count: result.rows.length,
+            has_more: result.rows.length === limit,
+          },
+          meta: {
             query_time_ms: Date.now() - startTime,
           },
         });
@@ -444,6 +605,7 @@ class Application {
           error: {
             code: 'INTERNAL_ERROR',
             message: 'Failed to fetch historical data',
+            requestId: req.id,
           },
         });
       }
@@ -452,23 +614,30 @@ class Application {
     // Real-time analysis endpoint
     this.app.post('/v1/analyze', async (req: Request, res: Response) => {
       const startTime = Date.now();
-      const { text, source } = req.body;
 
-      if (!text) {
+      // Validate request body
+      const validation = analyzeBodySchema.safeParse(req.body);
+      if (!validation.success) {
         res.status(400).json({
           error: {
-            code: 'INVALID_REQUEST',
-            message: 'Text field is required',
+            code: 'VALIDATION_ERROR',
+            message: 'Invalid request body',
+            details: validation.error.errors.map(e => ({
+              field: e.path.join('.'),
+              message: e.message,
+            })),
           },
         });
         return;
       }
 
+      const { text, source } = validation.data;
+
       try {
         const result = await this.sentimentEngine.analyze({
           id: `analyze_${Date.now()}`,
           text,
-          source: source || 'news',
+          source,
           timestamp: new Date(),
           metadata: {},
         });

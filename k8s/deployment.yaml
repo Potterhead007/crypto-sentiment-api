@@ -3,6 +3,84 @@
 # Production-Grade Configuration
 # =============================================================================
 
+# =============================================================================
+# Namespace
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sentiment
+  labels:
+    app: sentiment-api
+
+---
+# =============================================================================
+# ConfigMap - Non-sensitive configuration
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentiment-api-config
+  namespace: sentiment
+  labels:
+    app: sentiment-api
+data:
+  # Database
+  db_host: "timescaledb.sentiment.svc.cluster.local"
+  db_port: "5432"
+  db_name: "sentiment"
+  db_ssl: "true"
+  # Redis
+  redis_host: "redis-master.sentiment.svc.cluster.local"
+  redis_port: "6379"
+  # Kafka
+  kafka_brokers: "kafka-0.kafka.sentiment.svc.cluster.local:9092,kafka-1.kafka.sentiment.svc.cluster.local:9092,kafka-2.kafka.sentiment.svc.cluster.local:9092"
+  kafka_ssl: "true"
+  # CORS (set to your actual production domains)
+  cors_origins: "https://api.sentiment-api.io,https://app.sentiment-api.io"
+  # Monitoring
+  log_level: "info"
+
+---
+# =============================================================================
+# Secret - Sensitive credentials (base64 encoded)
+# NOTE: In production, use external secrets manager (AWS Secrets Manager, Vault)
+# These are PLACEHOLDER values - replace before deployment
+# =============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sentiment-api-secrets
+  namespace: sentiment
+  labels:
+    app: sentiment-api
+type: Opaque
+data:
+  # PLACEHOLDER VALUES - Replace with actual base64-encoded secrets
+  # echo -n 'your-password' | base64
+  db_password: "Y2hhbmdlLW1lLWluLXByb2R1Y3Rpb24="  # change-me-in-production
+  db_user: "c2VudGltZW50"  # sentiment
+  redis_password: "Y2hhbmdlLW1lLWluLXByb2R1Y3Rpb24="  # change-me-in-production
+  jwt_secret: "eW91ci1zZWN1cmUtand0LXNlY3JldC1taW4tMzItY2hhcmFjdGVycy1sb25n"  # placeholder
+  kafka_sasl_username: ""
+  kafka_sasl_password: ""
+
+---
+# =============================================================================
+# ServiceAccount
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sentiment-api
+  namespace: sentiment
+  labels:
+    app: sentiment-api
+
+---
+# =============================================================================
+# Deployment
+# =============================================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -127,6 +205,16 @@ spec:
                 configMapKeyRef:
                   name: sentiment-api-config
                   key: kafka_brokers
+            - name: CORS_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: sentiment-api-config
+                  key: cors_origins
+            - name: DB_SSL
+              valueFrom:
+                configMapKeyRef:
+                  name: sentiment-api-config
+                  key: db_ssl
 
           resources:
             requests:

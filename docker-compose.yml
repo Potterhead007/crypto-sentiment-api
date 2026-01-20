@@ -23,10 +23,12 @@ services:
       - REDIS_PORT=6379
       - DB_HOST=timescaledb
       - DB_PORT=5432
-      - DB_NAME=sentiment
-      - DB_USER=sentiment
-      - DB_PASSWORD=sentiment_dev_password
+      - DB_NAME=${DB_NAME:-sentiment}
+      - DB_USER=${DB_USER:-sentiment}
+      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
       - KAFKA_BROKERS=kafka:9092
+      - JWT_SECRET=${JWT_SECRET:-dev-only-insecure-secret}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}
     volumes:
       - ./src:/app/src:ro
       - ./tsconfig.json:/app/tsconfig.json:ro
@@ -46,9 +48,9 @@ services:
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_USER=sentiment
-      - POSTGRES_PASSWORD=sentiment_dev_password
-      - POSTGRES_DB=sentiment
+      - POSTGRES_USER=${DB_USER:-sentiment}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
+      - POSTGRES_DB=${DB_NAME:-sentiment}
     volumes:
       - timescaledb-data:/var/lib/postgresql/data
     networks:
@@ -144,8 +146,8 @@ services:
     ports:
       - "3001:3000"
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana-data:/var/lib/grafana

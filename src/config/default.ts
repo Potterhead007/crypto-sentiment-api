@@ -204,10 +204,21 @@ const config: Config = {
   },
 
   security: {
-    jwtSecret: process.env.JWT_SECRET || 'change-me-in-production',
+    jwtSecret: process.env.JWT_SECRET || (() => {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('CRITICAL: JWT_SECRET environment variable must be set in production');
+      }
+      return 'dev-only-insecure-secret-do-not-use-in-production';
+    })(),
     jwtExpiration: '24h',
     apiKeyHeader: 'X-API-Key',
-    corsOrigins: (process.env.CORS_ORIGINS || '*').split(','),
+    corsOrigins: (() => {
+      const origins = process.env.CORS_ORIGINS;
+      if (!origins && process.env.NODE_ENV === 'production') {
+        throw new Error('CRITICAL: CORS_ORIGINS environment variable must be set in production');
+      }
+      return (origins || 'http://localhost:3000,http://localhost:3001').split(',');
+    })(),
   },
 };
 
@@ -227,14 +238,30 @@ export function validateConfig(cfg: Config): void {
 
   // Security validation in production
   if (cfg.server.env === 'production') {
-    if (cfg.security.jwtSecret === 'change-me-in-production') {
-      errors.push('JWT secret must be changed in production');
+    // JWT Secret validation
+    if (!cfg.security.jwtSecret ||
+        cfg.security.jwtSecret.includes('change-me') ||
+        cfg.security.jwtSecret.includes('dev-only') ||
+        cfg.security.jwtSecret.length < 32) {
+      errors.push('CRITICAL: JWT secret must be a secure value (min 32 chars) in production');
     }
+
+    // Database validation
     if (!cfg.database.ssl) {
       errors.push('Database SSL must be enabled in production');
     }
+    if (!cfg.database.password) {
+      errors.push('Database password must be set in production');
+    }
+
+    // CORS validation
     if (cfg.security.corsOrigins.includes('*')) {
-      errors.push('CORS origins should not be * in production');
+      errors.push('CORS origins cannot be * in production');
+    }
+
+    // Redis validation
+    if (!cfg.redis.password) {
+      errors.push('Redis password should be set in production');
     }
   }
 
