@@ -298,6 +298,11 @@ export class SentimentEngine extends EventEmitter {
   private results: Map<string, SentimentResult> = new Map();
   private _ready: boolean = true;
 
+  private huggingFaceApiKey?: string;
+  private huggingFaceModel: string;
+  private mlCache: Map<string, { score: number; timestamp: number }> = new Map();
+  private readonly ML_CACHE_TTL = 300000; // 5 minutes
+
   constructor(config?: {
     modelVersion?: string;
     ensembleWeights?: Record<string, number>;
@@ -306,6 +311,8 @@ export class SentimentEngine extends EventEmitter {
     enableEmotionAnalysis?: boolean;
     confidenceMethod?: string;
     modelPath?: string;
+    huggingFaceApiKey?: string;
+    huggingFaceModel?: string;
   }) {
     super();
     this.modelId = 'sentiment-engine-v1';
@@ -316,6 +323,8 @@ export class SentimentEngine extends EventEmitter {
       contextual: 0.3,
     };
     this.batchSize = config?.batchSize || 100;
+    this.huggingFaceApiKey = config?.huggingFaceApiKey || process.env.HUGGINGFACE_API_KEY;
+    this.huggingFaceModel = config?.huggingFaceModel || 'ProsusAI/finbert';
     // Use additional config options
     if (config?.useCryptoLexicon) {
       // Enable crypto-specific lexicon (already enabled by default)
@@ -591,17 +600,103 @@ export class SentimentEngine extends EventEmitter {
   }
 
   private async analyzeTransformer(text: string, metadata: TextMetadata): Promise<number> {
-    // Simulated transformer analysis
-    // In production, this would call a FinBERT or custom model API
+    // Check cache first
+    const cacheKey = crypto.createHash('md5').update(text).digest('hex');
+    const cached = this.mlCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < this.ML_CACHE_TTL) {
+      return this.applyMetadataBoosts(cached.score, metadata);
+    }
 
-    // Use lexicon as base and add noise for simulation
-    const lexiconScore = await this.analyzeLexicon(text);
+    let score: number;
 
-    // Add some variance to simulate model behavior
-    const noise = (Math.random() - 0.5) * 0.2;
-    let score = lexiconScore + noise;
+    // Try HuggingFace Inference API if API key is available
+    if (this.huggingFaceApiKey) {
+      try {
+        score = await this.callHuggingFaceAPI(text);
+        this.mlCache.set(cacheKey, { score, timestamp: Date.now() });
+        return this.applyMetadataBoosts(score, metadata);
+      } catch (error) {
+        console.warn('HuggingFace API call failed, falling back to lexicon:', error);
+      }
+    }
 
-    // Boost based on engagement (simulating attention mechanism)
+    // Fallback to enhanced lexicon analysis
+    score = await this.analyzeLexicon(text);
+
+    // Apply slight variance for ensemble diversity
+    const variance = (Math.random() - 0.5) * 0.1;
+    score = Math.max(-1, Math.min(1, score + variance));
+
+    this.mlCache.set(cacheKey, { score, timestamp: Date.now() });
+    return this.applyMetadataBoosts(score, metadata);
+  }
+
+  private async callHuggingFaceAPI(text: string): Promise<number> {
+    const response = await fetch(
+      `https://api-inference.huggingface.co/models/${this.huggingFaceModel}`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.huggingFaceApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          inputs: text.slice(0, 512), // FinBERT max length
+          options: { wait_for_model: true },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`HuggingFace API error: ${response.status}`);
+    }
+
+    const data = await response.json() as Array<Array<{ label: string; score: number }>>;
+
+    // FinBERT returns: positive, negative, neutral
+    // Convert to -1 to 1 scale
+    if (Array.isArray(data) && Array.isArray(data[0])) {
+      const results = data[0];
+      let score = 0;
+
+      for (const result of results) {
+        if (result.label === 'positive') {
+          score += result.score;
+        } else if (result.label === 'negative') {
+          score -= result.score;
+        }
+        // neutral contributes 0
+      }
+
+      return Math.max(-1, Math.min(1, score));
+    }
+
+    // Alternative format (some models return different structure)
+    if (Array.isArray(data)) {
+      const result = data[0] as unknown as { label: string; score: number };
+      if (result?.label) {
+        const labelScores: Record<string, number> = {
+          'POSITIVE': 1,
+          'NEGATIVE': -1,
+          'NEUTRAL': 0,
+          'positive': 1,
+          'negative': -1,
+          'neutral': 0,
+          'LABEL_0': -1, // Often negative
+          'LABEL_1': 0,  // Often neutral
+          'LABEL_2': 1,  // Often positive
+        };
+        return (labelScores[result.label] ?? 0) * result.score;
+      }
+    }
+
+    throw new Error('Unexpected HuggingFace response format');
+  }
+
+  private applyMetadataBoosts(score: number, metadata: TextMetadata): number {
+    let boostedScore = score;
+
+    // Boost based on engagement
     if (metadata.engagement) {
       const engagementBoost = Math.min(0.1, Math.log10(
         (metadata.engagement.likes || 0) +
@@ -610,15 +705,15 @@ export class SentimentEngine extends EventEmitter {
         1
       ) * 0.02);
 
-      score = score > 0 ? score + engagementBoost : score - engagementBoost;
+      boostedScore = boostedScore > 0 ? boostedScore + engagementBoost : boostedScore - engagementBoost;
     }
 
     // Boost for verified authors
     if (metadata.authorVerified) {
-      score *= 1.1;
+      boostedScore *= 1.1;
     }
 
-    return Math.max(-1, Math.min(1, score));
+    return Math.max(-1, Math.min(1, boostedScore));
   }
 
   private async analyzeContextual(text: string, input: TextInput): Promise<number> {
@@ -1014,9 +1109,39 @@ export class SentimentEngine extends EventEmitter {
     return Array.from(byType.values()).sort((a, b) => b.strength - a.strength);
   }
 
-  private findTopInfluencers(_results: SentimentResult[], _limit: number): InfluencerMention[] {
-    // Placeholder - would need to track author info with results
-    return [];
+  private findTopInfluencers(results: SentimentResult[], limit: number): InfluencerMention[] {
+    // Extract influencer mentions from results that have author metadata
+    const influencerMap = new Map<string, InfluencerMention>();
+
+    for (const result of results) {
+      // Get the original input that was stored (if available)
+      const storedResult = this.results.get(result.inputId);
+      if (!storedResult) continue;
+
+      // Find person or organization entities that could be influencers
+      const authorEntity = result.entities.find(e => e.type === 'person' || e.type === 'organization');
+      if (!authorEntity) continue;
+
+      const author = authorEntity.text;
+      const existing = influencerMap.get(author);
+      const followers = (storedResult as any).authorFollowers || 0;
+
+      if (!existing || followers > existing.followers) {
+        influencerMap.set(author, {
+          author,
+          followers,
+          sentiment: result.sentiment.raw,
+          text: authorEntity.normalizedName || authorEntity.text,
+          timestamp: result.timestamp,
+          source: result.source,
+        });
+      }
+    }
+
+    // Sort by followers and return top N
+    return Array.from(influencerMap.values())
+      .sort((a, b) => b.followers - a.followers)
+      .slice(0, limit);
   }
 
   private calculateMomentum(results: SentimentResult[]): {

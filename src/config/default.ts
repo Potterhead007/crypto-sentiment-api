@@ -278,7 +278,7 @@ export function validateConfig(cfg: Config): void {
       errors.push('CRITICAL: Redis password must be set in production (REDIS_PASSWORD)');
     }
     if (!cfg.redis.tls) {
-      errors.push('WARNING: Redis TLS should be enabled in production (REDIS_TLS=true)');
+      errors.push('CRITICAL: Redis TLS must be enabled in production (REDIS_TLS=true)');
     }
 
     // Kafka validation

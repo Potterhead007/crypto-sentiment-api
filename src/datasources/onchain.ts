@@ -318,14 +318,15 @@ export class OnChainClient extends EventEmitter {
       }
 
       if (inflow > 0 || outflow > 0) {
+        const tokenPrice = await this.getTokenPrice(options.token) || 1;
         flows.push({
           exchange: exchangeName,
           chain,
           token: options.token,
           period,
-          inflow: inflow / (this.getTokenPrice(options.token) || 1),
-          outflow: outflow / (this.getTokenPrice(options.token) || 1),
-          netFlow: (outflow - inflow) / (this.getTokenPrice(options.token) || 1),
+          inflow: inflow / tokenPrice,
+          outflow: outflow / tokenPrice,
+          netFlow: (outflow - inflow) / tokenPrice,
           inflowUsd: inflow,
           outflowUsd: outflow,
           netFlowUsd: outflow - inflow,
@@ -491,7 +492,7 @@ export class OnChainClient extends EventEmitter {
         if (data.status === '1' && data.result) {
           for (const tx of data.result) {
             const amount = parseFloat(tx.value) / Math.pow(10, parseInt(tx.tokenDecimal || '18'));
-            const price = this.getTokenPrice(tx.tokenSymbol || 'ETH');
+            const price = await this.getTokenPrice(tx.tokenSymbol || 'ETH');
             const amountUsd = amount * (price || 0);
 
             transactions.push({
@@ -741,26 +742,151 @@ export class OnChainClient extends EventEmitter {
     return TOKEN_ADDRESSES[chain]?.[symbol.toUpperCase()];
   }
 
-  private getTokenPrice(symbol: string): number | undefined {
-    // In production, would fetch from price oracle
-    const mockPrices: Record<string, number> = {
-      'ETH': 3500,
-      'BTC': 95000,
-      'WETH': 3500,
-      'WBTC': 95000,
-      'USDT': 1,
-      'USDC': 1,
-      'DAI': 1,
+  private priceCache: Map<string, { price: number; timestamp: number }> = new Map();
+  private readonly PRICE_CACHE_TTL = 60000; // 1 minute
+
+  private async getTokenPrice(symbol: string): Promise<number | undefined> {
+    const upperSymbol = symbol.toUpperCase();
+
+    // Check cache first
+    const cached = this.priceCache.get(upperSymbol);
+    if (cached && Date.now() - cached.timestamp < this.PRICE_CACHE_TTL) {
+      return cached.price;
+    }
+
+    // Map common symbols to CoinGecko IDs
+    const coinGeckoIds: Record<string, string> = {
+      'BTC': 'bitcoin',
+      'ETH': 'ethereum',
+      'WETH': 'ethereum',
+      'WBTC': 'wrapped-bitcoin',
+      'USDT': 'tether',
+      'USDC': 'usd-coin',
+      'DAI': 'dai',
+      'SOL': 'solana',
+      'BNB': 'binancecoin',
+      'XRP': 'ripple',
+      'ADA': 'cardano',
+      'DOGE': 'dogecoin',
+      'AVAX': 'avalanche-2',
+      'DOT': 'polkadot',
+      'MATIC': 'matic-network',
+      'LINK': 'chainlink',
+      'UNI': 'uniswap',
+      'AAVE': 'aave',
+      'CRV': 'curve-dao-token',
+      'MKR': 'maker',
+      'COMP': 'compound-governance-token',
+      'SNX': 'havven',
+      'SUSHI': 'sushi',
+      'YFI': 'yearn-finance',
     };
-    return mockPrices[symbol.toUpperCase()];
+
+    const geckoId = coinGeckoIds[upperSymbol];
+    if (!geckoId) {
+      // For unknown tokens, try CoinGecko search
+      return this.searchTokenPrice(upperSymbol);
+    }
+
+    try {
+      const response = await fetch(
+        `https://api.coingecko.com/api/v3/simple/price?ids=${geckoId}&vs_currencies=usd`,
+        { headers: { 'Accept': 'application/json' } }
+      );
+
+      if (!response.ok) {
+        console.warn(`CoinGecko API error: ${response.status}`);
+        return undefined;
+      }
+
+      const data = await response.json() as Record<string, { usd?: number }>;
+      const price = data[geckoId]?.usd;
+
+      if (price !== undefined) {
+        this.priceCache.set(upperSymbol, { price, timestamp: Date.now() });
+        return price;
+      }
+    } catch (error) {
+      console.warn(`Failed to fetch price for ${symbol}:`, error);
+    }
+
+    return undefined;
   }
 
-  private async getActiveAddresses(_chain: Chain, _tokenAddress?: string): Promise<number> {
-    // Placeholder - would query from analytics provider
-    return Math.floor(Math.random() * 100000) + 50000;
+  private async searchTokenPrice(symbol: string): Promise<number | undefined> {
+    try {
+      const response = await fetch(
+        `https://api.coingecko.com/api/v3/search?query=${symbol}`,
+        { headers: { 'Accept': 'application/json' } }
+      );
+
+      if (!response.ok) return undefined;
+
+      const data = await response.json() as { coins?: Array<{ id: string; symbol: string }> };
+      const coin = data.coins?.find(c => c.symbol.toUpperCase() === symbol.toUpperCase());
+
+      if (coin) {
+        const priceResponse = await fetch(
+          `https://api.coingecko.com/api/v3/simple/price?ids=${coin.id}&vs_currencies=usd`
+        );
+        if (priceResponse.ok) {
+          const priceData = await priceResponse.json() as Record<string, { usd?: number }>;
+          const price = priceData[coin.id]?.usd;
+          if (price !== undefined) {
+            this.priceCache.set(symbol.toUpperCase(), { price, timestamp: Date.now() });
+            return price;
+          }
+        }
+      }
+    } catch {
+      // Silently fail for unknown tokens
+    }
+    return undefined;
   }
 
-  private async getTransactionStats(_chain: Chain, _tokenAddress?: string): Promise<{
+  private async getActiveAddresses(chain: Chain, tokenAddress?: string): Promise<number> {
+    const explorer = this.explorerApis.get(chain);
+    if (!explorer?.apiKey) {
+      // Return estimate based on known data if no API key
+      console.warn(`No API key for ${chain}, returning estimated active addresses`);
+      return chain === 'ethereum' ? 500000 : 100000;
+    }
+
+    try {
+      // For tokens, query token holder count; for native, query unique addresses
+      if (tokenAddress) {
+        const params = new URLSearchParams({
+          module: 'token',
+          action: 'tokenholderlist',
+          contractaddress: tokenAddress,
+          page: '1',
+          offset: '1',
+          apikey: explorer.apiKey,
+        });
+        const response = await fetch(`${explorer.baseUrl}?${params}`);
+        const data = await response.json() as { status: string; result?: any[] };
+        // Etherscan doesn't give total count directly, estimate from pagination
+        return data.status === '1' ? (data.result?.length || 0) * 1000 : 100000;
+      }
+
+      // For native token, use recent block stats
+      const params = new URLSearchParams({
+        module: 'proxy',
+        action: 'eth_blockNumber',
+        apikey: explorer.apiKey,
+      });
+      const response = await fetch(`${explorer.baseUrl}?${params}`);
+      const data = await response.json() as { result?: string };
+      // Estimate active addresses based on block height (rough correlation)
+      const blockNum = parseInt(data.result || '0', 16);
+      return Math.min(blockNum / 20, 1000000); // Rough estimate
+    } catch (error) {
+      console.warn(`Failed to get active addresses for ${chain}:`, error);
+      return 100000;
+    }
+  }
+
+  private async getTransactionStats(chain: Chain, tokenAddress?: string): Promise<{
     count: number;
     volume: number;
     volumeUsd: number;
@@ -769,41 +895,327 @@ export class OnChainClient extends EventEmitter {
     newAddresses: number;
     whaleCount: number;
   }> {
-    // Placeholder - would query from analytics provider
-    return {
-      count: Math.floor(Math.random() * 500000) + 100000,
-      volume: Math.floor(Math.random() * 1000000),
-      volumeUsd: Math.floor(Math.random() * 5000000000),
-      averageValue: Math.floor(Math.random() * 10000),
-      medianValue: Math.floor(Math.random() * 1000),
-      newAddresses: Math.floor(Math.random() * 10000),
-      whaleCount: Math.floor(Math.random() * 100),
-    };
+    const explorer = this.explorerApis.get(chain);
+    if (!explorer?.apiKey) {
+      console.warn(`No API key for ${chain}, returning estimated stats`);
+      return {
+        count: 100000,
+        volume: 1000000,
+        volumeUsd: 3500000000,
+        averageValue: 35000,
+        medianValue: 500,
+        newAddresses: 5000,
+        whaleCount: 50,
+      };
+    }
+
+    try {
+      let transactions: any[] = [];
+
+      if (tokenAddress) {
+        // Get recent token transfers
+        const params = new URLSearchParams({
+          module: 'account',
+          action: 'tokentx',
+          contractaddress: tokenAddress,
+          page: '1',
+          offset: '100',
+          sort: 'desc',
+          apikey: explorer.apiKey,
+        });
+        // Need an address for token tx queries - use a known exchange
+        const exchangeAddresses = this.getExchangeAddresses(chain);
+        const firstExchange = Object.values(exchangeAddresses)[0]?.[0];
+        if (firstExchange) {
+          params.set('address', firstExchange);
+          const response = await fetch(`${explorer.baseUrl}?${params}`);
+          const data = await response.json() as { status: string; result?: any[] };
+          if (data.status === '1' && data.result) {
+            transactions = data.result;
+          }
+        }
+      } else {
+        // Get recent block transactions
+        const params = new URLSearchParams({
+          module: 'proxy',
+          action: 'eth_getBlockByNumber',
+          tag: 'latest',
+          boolean: 'true',
+          apikey: explorer.apiKey,
+        });
+        const response = await fetch(`${explorer.baseUrl}?${params}`);
+        const data = await response.json() as { result?: { transactions?: any[] } };
+        transactions = data.result?.transactions || [];
+      }
+
+      if (transactions.length === 0) {
+        return {
+          count: 100000,
+          volume: 1000000,
+          volumeUsd: 3500000000,
+          averageValue: 35000,
+          medianValue: 500,
+          newAddresses: 5000,
+          whaleCount: 50,
+        };
+      }
+
+      // Calculate stats from sample
+      const values = transactions.map(tx => {
+        const value = parseFloat(tx.value || '0') / 1e18;
+        return value;
+      }).filter(v => v > 0);
+
+      const totalVolume = values.reduce((a, b) => a + b, 0);
+      const price = await this.getTokenPrice(tokenAddress ? 'TOKEN' : 'ETH') || 3500;
+      const sortedValues = [...values].sort((a, b) => a - b);
+      const whaleThreshold = 100; // 100 ETH
+
+      return {
+        count: transactions.length * 1000, // Extrapolate
+        volume: totalVolume * 1000,
+        volumeUsd: totalVolume * price * 1000,
+        averageValue: values.length > 0 ? (totalVolume / values.length) * price : 0,
+        medianValue: sortedValues.length > 0 ? sortedValues[Math.floor(sortedValues.length / 2)] * price : 0,
+        newAddresses: Math.floor(transactions.length * 0.1 * 1000), // Estimate 10% new
+        whaleCount: values.filter(v => v > whaleThreshold).length * 1000,
+      };
+    } catch (error) {
+      console.warn(`Failed to get transaction stats for ${chain}:`, error);
+      return {
+        count: 100000,
+        volume: 1000000,
+        volumeUsd: 3500000000,
+        averageValue: 35000,
+        medianValue: 500,
+        newAddresses: 5000,
+        whaleCount: 50,
+      };
+    }
   }
 
   private async getWalletBalance(
-    _address: string,
-    _chain: Chain
+    address: string,
+    chain: Chain
   ): Promise<{ token: string; amount: number; valueUsd: number }[]> {
-    // Placeholder - would query from explorer or Alchemy
-    return [];
+    const explorer = this.explorerApis.get(chain);
+    if (!explorer?.apiKey) {
+      console.warn(`No API key for ${chain}, cannot fetch wallet balance`);
+      return [];
+    }
+
+    const balances: { token: string; amount: number; valueUsd: number }[] = [];
+
+    try {
+      // Get native balance
+      const nativeParams = new URLSearchParams({
+        module: 'account',
+        action: 'balance',
+        address: address,
+        tag: 'latest',
+        apikey: explorer.apiKey,
+      });
+      const nativeResponse = await fetch(`${explorer.baseUrl}?${nativeParams}`);
+      const nativeData = await nativeResponse.json() as { status: string; result?: string };
+
+      if (nativeData.status === '1' && nativeData.result) {
+        const nativeSymbol = chain === 'ethereum' ? 'ETH' : chain === 'bsc' ? 'BNB' : 'MATIC';
+        const amount = parseFloat(nativeData.result) / 1e18;
+        const price = await this.getTokenPrice(nativeSymbol) || 0;
+        if (amount > 0) {
+          balances.push({
+            token: nativeSymbol,
+            amount,
+            valueUsd: amount * price,
+          });
+        }
+      }
+
+      // Get token balances (ERC-20)
+      const tokenParams = new URLSearchParams({
+        module: 'account',
+        action: 'tokentx',
+        address: address,
+        page: '1',
+        offset: '100',
+        sort: 'desc',
+        apikey: explorer.apiKey,
+      });
+      const tokenResponse = await fetch(`${explorer.baseUrl}?${tokenParams}`);
+      const tokenData = await tokenResponse.json() as { status: string; result?: any[] };
+
+      if (tokenData.status === '1' && tokenData.result) {
+        // Get unique tokens and their last known balances
+        const tokenBalances = new Map<string, { symbol: string; decimals: number; balance: number }>();
+
+        for (const tx of tokenData.result) {
+          const symbol = tx.tokenSymbol;
+          const decimals = parseInt(tx.tokenDecimal || '18');
+          const value = parseFloat(tx.value) / Math.pow(10, decimals);
+
+          if (!tokenBalances.has(symbol)) {
+            tokenBalances.set(symbol, { symbol, decimals, balance: 0 });
+          }
+
+          const current = tokenBalances.get(symbol)!;
+          if (tx.to.toLowerCase() === address.toLowerCase()) {
+            current.balance += value;
+          } else {
+            current.balance -= value;
+          }
+        }
+
+        for (const [symbol, data] of tokenBalances) {
+          if (data.balance > 0) {
+            const price = await this.getTokenPrice(symbol) || 0;
+            balances.push({
+              token: symbol,
+              amount: data.balance,
+              valueUsd: data.balance * price,
+            });
+          }
+        }
+      }
+    } catch (error) {
+      console.warn(`Failed to get wallet balance for ${address}:`, error);
+    }
+
+    return balances.sort((a, b) => b.valueUsd - a.valueUsd);
   }
 
   private async getWalletTransactions(
-    _address: string,
-    _chain: Chain,
-    _limit: number
+    address: string,
+    chain: Chain,
+    limit: number
   ): Promise<WhaleTransaction[]> {
-    // Would query from explorer
-    return [];
+    const explorer = this.explorerApis.get(chain);
+    if (!explorer?.apiKey) {
+      console.warn(`No API key for ${chain}, cannot fetch wallet transactions`);
+      return [];
+    }
+
+    const transactions: WhaleTransaction[] = [];
+
+    try {
+      const params = new URLSearchParams({
+        module: 'account',
+        action: 'txlist',
+        address: address,
+        page: '1',
+        offset: String(limit),
+        sort: 'desc',
+        apikey: explorer.apiKey,
+      });
+
+      const response = await fetch(`${explorer.baseUrl}?${params}`);
+      const data = await response.json() as { status: string; result?: any[] };
+
+      if (data.status === '1' && data.result) {
+        for (const tx of data.result) {
+          const amount = parseFloat(tx.value) / 1e18;
+          const price = await this.getTokenPrice('ETH') || 0;
+          const amountUsd = amount * price;
+
+          const fromInfo = await this.getWalletInfo(tx.from, chain);
+          const toInfo = await this.getWalletInfo(tx.to, chain);
+          const type = this.classifyTransaction(fromInfo, toInfo);
+
+          transactions.push({
+            id: `onchain_${tx.hash}`,
+            hash: tx.hash,
+            chain,
+            blockNumber: parseInt(tx.blockNumber),
+            timestamp: new Date(parseInt(tx.timeStamp) * 1000),
+            from: fromInfo,
+            to: toInfo,
+            token: {
+              symbol: 'ETH',
+              name: 'Ethereum',
+              address: '0x0',
+              decimals: 18,
+              priceUsd: price,
+            },
+            amount,
+            amountUsd,
+            type,
+            sentiment: this.calculateTransactionSentiment(type, amountUsd, fromInfo, toInfo),
+          });
+        }
+      }
+    } catch (error) {
+      console.warn(`Failed to get wallet transactions for ${address}:`, error);
+    }
+
+    return transactions;
   }
 
   private async getTokenTransfers(
-    _chain: Chain,
-    _options: { address: string; token?: string; period: string }
+    chain: Chain,
+    options: { address: string; token?: string; period: string }
   ): Promise<{ from: string; to: string; amountUsd: number }[]> {
-    // Placeholder
-    return [];
+    const explorer = this.explorerApis.get(chain);
+    if (!explorer?.apiKey) {
+      console.warn(`No API key for ${chain}, cannot fetch token transfers`);
+      return [];
+    }
+
+    const transfers: { from: string; to: string; amountUsd: number }[] = [];
+
+    try {
+      const params = new URLSearchParams({
+        module: 'account',
+        action: options.token ? 'tokentx' : 'txlist',
+        address: options.address,
+        page: '1',
+        offset: '100',
+        sort: 'desc',
+        apikey: explorer.apiKey,
+      });
+
+      if (options.token) {
+        params.set('contractaddress', options.token);
+      }
+
+      const response = await fetch(`${explorer.baseUrl}?${params}`);
+      const data = await response.json() as { status: string; result?: any[] };
+
+      if (data.status === '1' && data.result) {
+        // Filter by period
+        const periodMs = this.getPeriodMs(options.period);
+        const cutoff = Date.now() - periodMs;
+
+        for (const tx of data.result) {
+          const txTime = parseInt(tx.timeStamp) * 1000;
+          if (txTime < cutoff) continue;
+
+          const decimals = parseInt(tx.tokenDecimal || '18');
+          const amount = parseFloat(tx.value) / Math.pow(10, decimals);
+          const symbol = tx.tokenSymbol || 'ETH';
+          const price = await this.getTokenPrice(symbol) || 0;
+
+          transfers.push({
+            from: tx.from,
+            to: tx.to,
+            amountUsd: amount * price,
+          });
+        }
+      }
+    } catch (error) {
+      console.warn(`Failed to get token transfers:`, error);
+    }
+
+    return transfers;
+  }
+
+  private getPeriodMs(period: string): number {
+    const periods: Record<string, number> = {
+      '1h': 60 * 60 * 1000,
+      '4h': 4 * 60 * 60 * 1000,
+      '24h': 24 * 60 * 60 * 1000,
+      '7d': 7 * 24 * 60 * 60 * 1000,
+      '30d': 30 * 24 * 60 * 60 * 1000,
+    };
+    return periods[period] || periods['24h'];
   }
 
   private initializeKnownLabels(): void {
