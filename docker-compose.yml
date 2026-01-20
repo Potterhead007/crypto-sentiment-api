@@ -46,7 +46,7 @@ services:
   timescaledb:
     image: timescale/timescaledb:2.13.1-pg15
     ports:
-      - "127.0.0.1:5432:5432"  # Bind to localhost only - CRITICAL for database security
+      - "127.0.0.1:5433:5432"  # Bind to localhost only on 5433 (5432 may be used by local Postgres)
     environment:
       - POSTGRES_USER=${DB_USER:-sentiment}
       - POSTGRES_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
