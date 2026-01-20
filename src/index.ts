@@ -12,9 +12,8 @@ import { createServer, Server } from 'http';
 import { WebSocketServer } from 'ws';
 import Redis from 'ioredis';
 import { Pool } from 'pg';
-import { Registry, collectDefaultMetrics, Counter, Histogram, Gauge } from 'prom-client';
-
 import { z } from 'zod';
+import { metricsRegistry, sentimentAnalysisTotal, datasourceHealth } from './metrics';
 import config, { validateConfig } from './config/default';
 import { createRateLimitMiddleware, WebSocketConnectionLimiter } from './middleware/rateLimiter';
 import { SessionManager } from './websocket/reconnectionProtocol';
@@ -65,109 +64,6 @@ const INTERVAL_TABLE_MAP: Record<string, string> = {
 } as const;
 
 // =============================================================================
-// APPLICATION SETUP
-// =============================================================================
-
-// =============================================================================
-// PROMETHEUS METRICS
-// =============================================================================
-
-const metricsRegistry = new Registry();
-collectDefaultMetrics({ register: metricsRegistry });
-
-// These metrics are registered with Prometheus and exposed via /metrics endpoint
-// They can be used throughout the application for instrumentation
-new Counter({
-  name: 'http_requests_total',
-  help: 'Total number of HTTP requests',
-  labelNames: ['method', 'endpoint', 'status', 'tier'],
-  registers: [metricsRegistry],
-});
-
-new Histogram({
-  name: 'http_request_duration_seconds',
-  help: 'HTTP request duration in seconds',
-  labelNames: ['method', 'endpoint'],
-  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
-  registers: [metricsRegistry],
-});
-
-new Gauge({
-  name: 'websocket_connections_active',
-  help: 'Number of active WebSocket connections',
-  registers: [metricsRegistry],
-});
-
-const sentimentAnalysisTotal = new Counter({
-  name: 'sentiment_analysis_total',
-  help: 'Total sentiment analyses performed',
-  labelNames: ['source', 'asset'],
-  registers: [metricsRegistry],
-});
-
-const datasourceHealth = new Gauge({
-  name: 'datasource_health',
-  help: 'Health status of data sources (1=up, 0=down)',
-  labelNames: ['source'],
-  registers: [metricsRegistry],
-});
-
-// Data freshness tracking
-const sentimentLastProcessed = new Gauge({
-  name: 'sentiment_last_processed_timestamp',
-  help: 'Unix timestamp of last processed sentiment for each asset',
-  labelNames: ['asset'],
-  registers: [metricsRegistry],
-});
-
-// Rate limit monitoring
-const datasourceRateLimitUsage = new Gauge({
-  name: 'datasource_rate_limit_usage',
-  help: 'Current rate limit usage percentage (0-1)',
-  labelNames: ['source'],
-  registers: [metricsRegistry],
-});
-
-// Sentiment score tracking for anomaly detection
-const sentimentScoreGauge = new Gauge({
-  name: 'sentiment_score',
-  help: 'Current sentiment score for each asset (-1 to 1)',
-  labelNames: ['asset', 'source'],
-  registers: [metricsRegistry],
-});
-
-// Mention volume tracking
-const sentimentMentionsTotal = new Counter({
-  name: 'sentiment_mentions_total',
-  help: 'Total number of mentions per asset and source',
-  labelNames: ['asset', 'source'],
-  registers: [metricsRegistry],
-});
-
-// Pipeline processing metrics
-const pipelineProcessedTotal = new Counter({
-  name: 'pipeline_processed_total',
-  help: 'Total items processed by the pipeline',
-  labelNames: ['status'],
-  registers: [metricsRegistry],
-});
-
-const pipelineQueueSize = new Gauge({
-  name: 'pipeline_queue_size',
-  help: 'Current size of the processing queue',
-  registers: [metricsRegistry],
-});
-
-// Database query metrics
-const dbQueryDuration = new Histogram({
-  name: 'db_query_duration_seconds',
-  help: 'Database query duration in seconds',
-  labelNames: ['query_type'],
-  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
-  registers: [metricsRegistry],
-});
-
-// =============================================================================
 // APPLICATION CLASS
 // =============================================================================
 
@@ -181,6 +77,7 @@ class Application {
   private wsConnectionLimiter: WebSocketConnectionLimiter;
   private sentimentEngine: SentimentEngine;
   private pipeline: AggregationPipeline | null = null;
+  private readonly ipSalt: string = crypto.randomBytes(16).toString('hex');
 
   constructor() {
     // Validate configuration
@@ -224,11 +121,13 @@ class Application {
       path: config.websocket.path,
     });
 
-    // Initialize session manager
+    // Initialize session manager with Redis for horizontal scaling
     this.sessionManager = new SessionManager({
+      redis: this.redis,
       bufferDurationMs: config.websocket.messageBufferDuration,
       maxBufferSize: 10000,
       recoveryEndpoint: '/v1/stream/replay',
+      sessionTTL: 3600, // 1 hour
     });
 
     // Initialize WebSocket connection limiter
@@ -308,9 +207,11 @@ class Application {
         getClientContext: async (req: Request) => {
           const apiKey = req.headers[config.security.apiKeyHeader.toLowerCase()] as string;
 
-          // Anonymous users get lowest tier
+          // Anonymous users get restricted anonymous tier
           if (!apiKey || !apiKey.startsWith('sk_') || apiKey.length < 32) {
-            return { clientId: 'anonymous', tier: 'professional' as const };
+            // Generate unique anonymous ID based on IP hash for per-user limiting
+            const anonId = `anon_${crypto.createHash('sha256').update(req.ip || '').digest('hex').slice(0, 16)}`;
+            return { clientId: anonId, tier: 'anonymous' as const };
           }
 
           // Hash the API key and lookup in database
@@ -333,13 +234,15 @@ class Application {
               // Attach client info to request for downstream use
               (req as any).clientId = client_id;
               (req as any).clientTier = tier;
-              return { clientId: client_id, tier: tier as 'professional' | 'institutional' | 'enterprise' | 'strategic' };
+              return { clientId: client_id, tier: tier as 'anonymous' | 'professional' | 'institutional' | 'enterprise' | 'strategic' };
             }
           } catch (error) {
             console.error('Rate limit client lookup error:', (error as Error).message);
           }
 
-          return { clientId: 'anonymous', tier: 'professional' as const };
+          // Fallback to anonymous tier for invalid API keys
+          const anonId = `anon_${crypto.createHash('sha256').update(req.ip || '').digest('hex').slice(0, 16)}`;
+          return { clientId: anonId, tier: 'anonymous' as const };
         },
         skip: (req: Request) => {
           // Skip rate limiting for health checks
@@ -354,8 +257,36 @@ class Application {
   // ---------------------------------------------------------------------------
 
   private setupRoutes(): void {
-    // Prometheus metrics endpoint
-    this.app.get('/metrics', async (_req: Request, res: Response) => {
+    // Prometheus metrics endpoint - restricted to internal access only
+    this.app.get('/metrics', async (req: Request, res: Response) => {
+      // Security: Only allow internal network access or authenticated Prometheus scrapers
+      const clientIp = req.ip || req.socket.remoteAddress || '';
+      const isInternal = clientIp.startsWith('10.') ||
+                         clientIp.startsWith('172.16.') ||
+                         clientIp.startsWith('172.17.') ||
+                         clientIp.startsWith('172.18.') ||
+                         clientIp.startsWith('172.19.') ||
+                         clientIp.startsWith('172.2') ||
+                         clientIp.startsWith('172.3') ||
+                         clientIp.startsWith('192.168.') ||
+                         clientIp === '127.0.0.1' ||
+                         clientIp === '::1' ||
+                         clientIp === '::ffff:127.0.0.1';
+
+      // Allow internal IPs or requests with valid metrics token
+      const metricsToken = req.headers['x-metrics-token'] as string;
+      const validMetricsToken = process.env.METRICS_ACCESS_TOKEN;
+
+      if (!isInternal && (!validMetricsToken || metricsToken !== validMetricsToken)) {
+        res.status(403).json({
+          error: {
+            code: 'FORBIDDEN',
+            message: 'Metrics endpoint is restricted to internal access',
+          },
+        });
+        return;
+      }
+
       res.set('Content-Type', metricsRegistry.contentType);
       res.send(await metricsRegistry.metrics());
     });
@@ -934,9 +865,32 @@ class Application {
     }
   }
 
+  /**
+   * Extracts and validates clientId from WebSocket request.
+   * Returns hashed IP for anonymous/invalid clientIds to prevent spoofing.
+   */
   private extractClientId(req: any): string {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    return url.searchParams.get('clientId') || 'anonymous';
+    const clientId = url.searchParams.get('clientId');
+
+    // Validate format: alphanumeric, underscore, hyphen only, max 64 chars
+    if (clientId && /^[a-zA-Z0-9_-]{1,64}$/.test(clientId)) {
+      return clientId;
+    }
+
+    // Invalid or missing clientId - generate anonymous ID from IP hash
+    return `anon_${this.hashIp(req.socket?.remoteAddress || 'unknown')}`;
+  }
+
+  /**
+   * Creates a salted hash of an IP address for anonymous client identification.
+   */
+  private hashIp(ip: string): string {
+    return crypto
+      .createHash('sha256')
+      .update(ip + this.ipSalt)
+      .digest('hex')
+      .slice(0, 16);
   }
 
   // ---------------------------------------------------------------------------

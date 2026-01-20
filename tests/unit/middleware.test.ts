@@ -3,7 +3,7 @@
  * Tests for rate limiting, authentication, and other middleware
  */
 
-import { Request, Response, NextFunction } from 'express';
+import { Request, Response } from 'express';
 
 // Recreate rate limit tier config from main app
 interface TierLimits {

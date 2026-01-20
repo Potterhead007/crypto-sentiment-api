@@ -66,6 +66,7 @@ export interface DatabaseConfig {
 export interface RateLimitingConfig {
   enabled: boolean;
   tiers: {
+    anonymous: TierLimits;
     professional: TierLimits;
     institutional: TierLimits;
     enterprise: TierLimits;
@@ -160,6 +161,14 @@ const config: Config = {
   rateLimiting: {
     enabled: true,
     tiers: {
+      // Anonymous tier - heavily restricted for unauthenticated requests
+      anonymous: {
+        requestsPerSecond: 1,
+        burstCapacity: 10,
+        burstWindowSeconds: 60,
+        websocketConnections: 1,
+        monthlyQuota: 1_000,
+      },
       professional: {
         requestsPerSecond: 10,
         burstCapacity: 50,

@@ -12,7 +12,7 @@ import Redis from 'ioredis';
 // TYPES & INTERFACES
 // =============================================================================
 
-export type TierName = 'professional' | 'institutional' | 'enterprise' | 'strategic';
+export type TierName = 'anonymous' | 'professional' | 'institutional' | 'enterprise' | 'strategic';
 
 export interface TierLimits {
   requestsPerSecond: number;
@@ -55,6 +55,14 @@ export interface ClientContext {
 
 export const DEFAULT_CONFIG: RateLimitConfig = {
   tiers: {
+    // Anonymous tier - heavily restricted for unauthenticated requests
+    anonymous: {
+      requestsPerSecond: 1,
+      burstCapacity: 10,
+      burstWindowSeconds: 60,
+      websocketConnections: 1,
+      monthlyQuota: 1_000,
+    },
     professional: {
       requestsPerSecond: 10,
       burstCapacity: 50,

@@ -12,6 +12,7 @@
 
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
+import Redis from 'ioredis';
 
 // =============================================================================
 // TYPES & INTERFACES
@@ -698,22 +699,41 @@ export class MessageBuffer {
 }
 
 // =============================================================================
-// SERVER-SIDE SESSION MANAGER
+// SERVER-SIDE SESSION MANAGER (Redis-backed for horizontal scaling)
 // =============================================================================
 
+export interface SessionManagerConfig {
+  redis?: Redis;
+  keyPrefix?: string;
+  sessionTTL?: number; // seconds
+  bufferDurationMs?: number;
+  maxBufferSize?: number;
+  recoveryEndpoint?: string;
+}
+
 export class SessionManager {
-  private sessions: Map<string, SessionState> = new Map();
+  private redis: Redis | null;
+  private localSessions: Map<string, SessionState> = new Map(); // Fallback for non-Redis mode
   private messageBuffer: MessageBuffer;
   private sequenceCounter: number = 0;
+  private keyPrefix: string;
+  private sessionTTL: number;
 
-  constructor(recoveryConfig?: MessageRecoveryConfig) {
-    this.messageBuffer = new MessageBuffer(recoveryConfig);
+  constructor(config: SessionManagerConfig = {}) {
+    this.redis = config.redis || null;
+    this.keyPrefix = config.keyPrefix || 'ws:session:';
+    this.sessionTTL = config.sessionTTL || 3600; // 1 hour default
+    this.messageBuffer = new MessageBuffer({
+      bufferDurationMs: config.bufferDurationMs || DEFAULT_RECOVERY_CONFIG.bufferDurationMs,
+      maxBufferSize: config.maxBufferSize || DEFAULT_RECOVERY_CONFIG.maxBufferSize,
+      recoveryEndpoint: config.recoveryEndpoint || DEFAULT_RECOVERY_CONFIG.recoveryEndpoint,
+    });
   }
 
   /**
    * Create a new session
    */
-  createSession(_clientId: string): SessionState {
+  createSession(clientId: string): SessionState {
     const sessionId = this.generateSessionId();
     const session: SessionState = {
       sessionId,
@@ -723,15 +743,31 @@ export class SessionManager {
       lastMessageAt: new Date(),
     };
 
-    this.sessions.set(sessionId, session);
+    // Store in Redis if available, otherwise use local Map
+    if (this.redis) {
+      this.storeSessionInRedis(session, clientId);
+    } else {
+      this.localSessions.set(sessionId, session);
+    }
+
     return session;
   }
 
   /**
    * Get session by ID
    */
-  getSession(sessionId: string): SessionState | undefined {
-    return this.sessions.get(sessionId);
+  async getSession(sessionId: string): Promise<SessionState | undefined> {
+    if (this.redis) {
+      return this.getSessionFromRedis(sessionId);
+    }
+    return this.localSessions.get(sessionId);
+  }
+
+  /**
+   * Synchronous get for backwards compatibility (uses local cache)
+   */
+  getSessionSync(sessionId: string): SessionState | undefined {
+    return this.localSessions.get(sessionId);
   }
 
   /**
@@ -741,8 +777,12 @@ export class SessionManager {
     sessionId: string,
     lastSequence: number
   ): { session: SessionState; recovery: RecoveryResponse } | null {
-    const session = this.sessions.get(sessionId);
+    // For resume, we check local first, then async Redis load
+    let session = this.localSessions.get(sessionId);
+
     if (!session) {
+      // Try to load from Redis synchronously via cache
+      // In production, this should be async
       return null;
     }
 
@@ -755,6 +795,47 @@ export class SessionManager {
     // Update session
     session.connectedAt = new Date();
     session.lastMessageAt = new Date();
+
+    // Update in Redis
+    if (this.redis) {
+      this.updateSessionInRedis(session);
+    }
+
+    return { session, recovery };
+  }
+
+  /**
+   * Async resume with Redis support
+   */
+  async resumeSessionAsync(
+    sessionId: string,
+    lastSequence: number
+  ): Promise<{ session: SessionState; recovery: RecoveryResponse } | null> {
+    let session = this.localSessions.get(sessionId);
+
+    // Try Redis if not in local cache
+    if (!session && this.redis) {
+      session = await this.getSessionFromRedis(sessionId);
+      if (session) {
+        this.localSessions.set(sessionId, session);
+      }
+    }
+
+    if (!session) {
+      return null;
+    }
+
+    const recovery = this.messageBuffer.getMessages({
+      sessionId,
+      fromSequence: lastSequence,
+    });
+
+    session.connectedAt = new Date();
+    session.lastMessageAt = new Date();
+
+    if (this.redis) {
+      await this.updateSessionInRedis(session);
+    }
 
     return { session, recovery };
   }
@@ -772,10 +853,14 @@ export class SessionManager {
       payload,
     });
 
-    const session = this.sessions.get(sessionId);
+    const session = this.localSessions.get(sessionId);
     if (session) {
       session.lastSequenceNumber = sequenceNumber;
       session.lastMessageAt = new Date();
+
+      if (this.redis) {
+        this.updateSessionInRedis(session);
+      }
     }
 
     return sequenceNumber;
@@ -785,7 +870,11 @@ export class SessionManager {
    * End a session
    */
   endSession(sessionId: string): void {
-    this.sessions.delete(sessionId);
+    this.localSessions.delete(sessionId);
+
+    if (this.redis) {
+      this.redis.del(`${this.keyPrefix}${sessionId}`).catch(() => {});
+    }
     // Keep buffer for potential reconnection within buffer duration
   }
 
@@ -795,12 +884,76 @@ export class SessionManager {
   cleanupExpiredSessions(maxAgeMs: number): void {
     const cutoff = Date.now() - maxAgeMs;
 
-    for (const [sessionId, session] of this.sessions.entries()) {
+    for (const [sessionId, session] of this.localSessions.entries()) {
       if (session.lastMessageAt.getTime() < cutoff) {
-        this.sessions.delete(sessionId);
+        this.localSessions.delete(sessionId);
         this.messageBuffer.clearSession(sessionId);
+
+        if (this.redis) {
+          this.redis.del(`${this.keyPrefix}${sessionId}`).catch(() => {});
+        }
       }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // REDIS HELPERS
+  // ---------------------------------------------------------------------------
+
+  private async storeSessionInRedis(session: SessionState, clientId: string): Promise<void> {
+    if (!this.redis) return;
+
+    const data = {
+      ...session,
+      clientId,
+      connectedAt: session.connectedAt.toISOString(),
+      lastMessageAt: session.lastMessageAt.toISOString(),
+    };
+
+    await this.redis.setex(
+      `${this.keyPrefix}${session.sessionId}`,
+      this.sessionTTL,
+      JSON.stringify(data)
+    );
+
+    // Also cache locally for fast access
+    this.localSessions.set(session.sessionId, session);
+  }
+
+  private async getSessionFromRedis(sessionId: string): Promise<SessionState | undefined> {
+    if (!this.redis) return undefined;
+
+    try {
+      const data = await this.redis.get(`${this.keyPrefix}${sessionId}`);
+      if (!data) return undefined;
+
+      const parsed = JSON.parse(data);
+      return {
+        sessionId: parsed.sessionId,
+        lastSequenceNumber: parsed.lastSequenceNumber,
+        subscriptions: parsed.subscriptions || [],
+        connectedAt: new Date(parsed.connectedAt),
+        lastMessageAt: new Date(parsed.lastMessageAt),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async updateSessionInRedis(session: SessionState): Promise<void> {
+    if (!this.redis) return;
+
+    const data = {
+      ...session,
+      connectedAt: session.connectedAt.toISOString(),
+      lastMessageAt: session.lastMessageAt.toISOString(),
+    };
+
+    await this.redis.setex(
+      `${this.keyPrefix}${session.sessionId}`,
+      this.sessionTTL,
+      JSON.stringify(data)
+    ).catch(() => {});
   }
 
   private generateSessionId(): string {

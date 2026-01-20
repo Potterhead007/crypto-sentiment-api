@@ -469,7 +469,7 @@ export class TwitterClient extends EventEmitter {
   }
 
   private async searchTweetScout(
-    params: TwitterSearchParams,
+    _params: TwitterSearchParams,
     apiKey: string,
     baseUrl: string
   ): Promise<Tweet[]> {
@@ -511,8 +511,8 @@ export class TwitterClient extends EventEmitter {
       throw new Error(`Apify API error: ${response.status}`);
     }
 
-    const data = await response.json();
-    // Would need to poll for results - simplified here
+    await response.json(); // Would need to poll for results
+    // Simplified placeholder - full implementation would poll for results
     return [];
   }
 
@@ -593,7 +593,7 @@ export class TwitterClient extends EventEmitter {
     };
   }
 
-  private mapFallbackTweet(data: any, provider: string): Tweet {
+  private mapFallbackTweet(data: any, _provider: string): Tweet {
     // Generic mapping for fallback providers
     return {
       id: data.id || data.tweet_id || crypto.randomBytes(8).toString('hex'),

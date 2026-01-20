@@ -44,7 +44,28 @@ export class DatabaseMigrator {
   private pool: Pool;
   private config: MigratorConfig;
 
+  /**
+   * Validates schema table name to prevent SQL injection.
+   * Only allows valid PostgreSQL identifier characters.
+   */
+  private validateSchemaTable(name: string): void {
+    // PostgreSQL identifiers: start with letter or underscore, contain letters, digits, underscores
+    if (!/^[a-z_][a-z0-9_]*$/i.test(name)) {
+      throw new Error(
+        `Invalid schema table name: "${name}". ` +
+          'Must start with letter or underscore and contain only letters, digits, and underscores.'
+      );
+    }
+    // Additional length check (PostgreSQL max identifier is 63 chars)
+    if (name.length > 63) {
+      throw new Error(`Schema table name too long: ${name.length} chars (max 63)`);
+    }
+  }
+
   constructor(config: Partial<MigratorConfig> = {}) {
+    const schemaTable = config.schemaTable || '_migrations';
+    this.validateSchemaTable(schemaTable);
+
     this.config = {
       host: config.host || process.env.DB_HOST || 'localhost',
       port: config.port || parseInt(process.env.DB_PORT || '5432'),
@@ -52,7 +73,7 @@ export class DatabaseMigrator {
       user: config.user || process.env.DB_USER || 'sentiment',
       password: config.password || process.env.DB_PASSWORD || '',
       migrationsPath: config.migrationsPath || path.join(__dirname, 'migrations'),
-      schemaTable: config.schemaTable || '_migrations',
+      schemaTable,
     };
 
     this.pool = new Pool({

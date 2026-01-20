@@ -80,7 +80,6 @@ export interface NewsSearchParams {
 
 export class NewsClient extends EventEmitter {
   private config: NewsConfig;
-  private cache: Map<string, { article: NewsArticle; expiry: Date }> = new Map();
   private pollingTimer: ReturnType<typeof setInterval> | null = null;
   private lastPollTime: Map<string, Date> = new Map();
 

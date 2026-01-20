@@ -43,9 +43,22 @@ data:
 
 ---
 # =============================================================================
-# Secret - Sensitive credentials (base64 encoded)
-# NOTE: In production, use external secrets manager (AWS Secrets Manager, Vault)
-# These are PLACEHOLDER values - replace before deployment
+# Secret - MUST BE POPULATED BY EXTERNAL SECRETS MANAGER
+# =============================================================================
+# SECURITY: Do NOT store actual secrets in this file.
+# Use one of:
+#   - AWS Secrets Manager + External Secrets Operator
+#   - HashiCorp Vault + Vault Secrets Operator
+#   - Azure Key Vault + CSI Driver
+#   - Sealed Secrets (Bitnami)
+#
+# Required secret keys:
+#   - db_password: PostgreSQL password
+#   - db_user: PostgreSQL username
+#   - redis_password: Redis AUTH password
+#   - jwt_secret: JWT signing secret (min 32 chars)
+#   - kafka_sasl_username: Kafka SASL username (if using SASL)
+#   - kafka_sasl_password: Kafka SASL password (if using SASL)
 # =============================================================================
 apiVersion: v1
 kind: Secret
@@ -54,16 +67,13 @@ metadata:
   namespace: sentiment
   labels:
     app: sentiment-api
+  annotations:
+    # Example: External Secrets Operator
+    # external-secrets.io/backend: aws-secrets-manager
+    # external-secrets.io/secret-path: /prod/sentiment-api
+    kubernetes.io/description: "Secrets must be populated by external secrets manager before deployment"
 type: Opaque
-data:
-  # PLACEHOLDER VALUES - Replace with actual base64-encoded secrets
-  # echo -n 'your-password' | base64
-  db_password: "Y2hhbmdlLW1lLWluLXByb2R1Y3Rpb24="  # change-me-in-production
-  db_user: "c2VudGltZW50"  # sentiment
-  redis_password: "Y2hhbmdlLW1lLWluLXByb2R1Y3Rpb24="  # change-me-in-production
-  jwt_secret: "eW91ci1zZWN1cmUtand0LXNlY3JldC1taW4tMzItY2hhcmFjdGVycy1sb25n"  # placeholder
-  kafka_sasl_username: ""
-  kafka_sasl_password: ""
+# data: {} # Populated by external secrets operator or manual kubectl create secret
 
 ---
 # =============================================================================
@@ -219,8 +229,8 @@ spec:
 
           resources:
             requests:
-              cpu: "250m"
-              memory: "512Mi"
+              cpu: "500m"
+              memory: "768Mi"
             limits:
               cpu: "1000m"
               memory: "1Gi"
@@ -307,7 +317,7 @@ spec:
     kind: Deployment
     name: sentiment-api
   minReplicas: 3
-  maxReplicas: 20
+  maxReplicas: 10
   metrics:
     - type: Resource
       resource:
@@ -361,35 +371,6 @@ spec:
   selector:
     matchLabels:
       app: sentiment-api
-
----
-# =============================================================================
-# Service Account
-# =============================================================================
-
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: sentiment-api
-  namespace: sentiment
-
----
-# =============================================================================
-# ConfigMap
-# =============================================================================
-
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: sentiment-api-config
-  namespace: sentiment
-data:
-  redis_host: "redis-master.sentiment.svc.cluster.local"
-  redis_port: "6379"
-  db_host: "timescaledb.sentiment.svc.cluster.local"
-  db_port: "5432"
-  db_name: "sentiment"
-  kafka_brokers: "kafka-0.kafka-headless.sentiment.svc.cluster.local:9092,kafka-1.kafka-headless.sentiment.svc.cluster.local:9092,kafka-2.kafka-headless.sentiment.svc.cluster.local:9092"
 
 ---
 # =============================================================================

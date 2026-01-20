@@ -283,7 +283,9 @@ SELECT add_compression_policy('audit_log', INTERVAL '30 days', if_not_exists => 
 
 SELECT add_retention_policy('sentiment_raw', INTERVAL '90 days', if_not_exists => TRUE);
 SELECT add_retention_policy('sentiment_aggregated_1m', INTERVAL '365 days', if_not_exists => TRUE);
-SELECT add_retention_policy('audit_log', INTERVAL '730 days', if_not_exists => TRUE);
+-- SEC Rule 17a-3 compliance: 7 year retention for audit and financial data
+SELECT add_retention_policy('audit_log', INTERVAL '2555 days', if_not_exists => TRUE);
+SELECT add_retention_policy('onchain_flows', INTERVAL '2555 days', if_not_exists => TRUE);
 
 -- =============================================================================
 -- Seed Data

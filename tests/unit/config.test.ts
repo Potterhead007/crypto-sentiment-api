@@ -51,6 +51,13 @@ describe('Configuration', () => {
     rateLimiting: {
       enabled: true,
       tiers: {
+        anonymous: {
+          requestsPerSecond: 1,
+          burstCapacity: 10,
+          burstWindowSeconds: 60,
+          websocketConnections: 1,
+          monthlyQuota: 1000,
+        },
         professional: {
           requestsPerSecond: 10,
           burstCapacity: 50,

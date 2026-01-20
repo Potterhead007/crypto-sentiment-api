@@ -15,7 +15,7 @@ services:
       dockerfile: Dockerfile
       target: development
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"  # Bind to localhost only
     environment:
       - NODE_ENV=development
       - PORT=3000
@@ -46,7 +46,7 @@ services:
   timescaledb:
     image: timescale/timescaledb:2.13.1-pg15
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"  # Bind to localhost only - CRITICAL for database security
     environment:
       - POSTGRES_USER=${DB_USER:-sentiment}
       - POSTGRES_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
@@ -68,7 +68,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"  # Bind to localhost only - CRITICAL for cache security
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis-data:/data
@@ -99,7 +99,7 @@ services:
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"  # Bind to localhost only
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -124,7 +124,7 @@ services:
   prometheus:
     image: prom/prometheus:v2.47.0
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"  # Bind to localhost only
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -144,7 +144,7 @@ services:
   grafana:
     image: grafana/grafana:10.1.0
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"  # Bind to localhost only
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
@@ -165,7 +165,7 @@ services:
   kafka-ui:
     image: provectuslabs/kafka-ui:v0.7.1
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"  # Bind to localhost only
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092

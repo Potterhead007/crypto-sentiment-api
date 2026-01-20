@@ -755,12 +755,12 @@ export class OnChainClient extends EventEmitter {
     return mockPrices[symbol.toUpperCase()];
   }
 
-  private async getActiveAddresses(chain: Chain, tokenAddress?: string): Promise<number> {
+  private async getActiveAddresses(_chain: Chain, _tokenAddress?: string): Promise<number> {
     // Placeholder - would query from analytics provider
     return Math.floor(Math.random() * 100000) + 50000;
   }
 
-  private async getTransactionStats(chain: Chain, tokenAddress?: string): Promise<{
+  private async getTransactionStats(_chain: Chain, _tokenAddress?: string): Promise<{
     count: number;
     volume: number;
     volumeUsd: number;
@@ -782,25 +782,25 @@ export class OnChainClient extends EventEmitter {
   }
 
   private async getWalletBalance(
-    address: string,
-    chain: Chain
+    _address: string,
+    _chain: Chain
   ): Promise<{ token: string; amount: number; valueUsd: number }[]> {
     // Placeholder - would query from explorer or Alchemy
     return [];
   }
 
   private async getWalletTransactions(
-    address: string,
-    chain: Chain,
-    limit: number
+    _address: string,
+    _chain: Chain,
+    _limit: number
   ): Promise<WhaleTransaction[]> {
     // Would query from explorer
     return [];
   }
 
   private async getTokenTransfers(
-    chain: Chain,
-    options: { address: string; token?: string; period: string }
+    _chain: Chain,
+    _options: { address: string; token?: string; period: string }
   ): Promise<{ from: string; to: string; amountUsd: number }[]> {
     // Placeholder
     return [];
