@@ -99,6 +99,20 @@ jobs:
           DB_USER: test
           DB_PASSWORD: test
 
+      - name: Check coverage threshold
+        run: |
+          # Extract coverage percentage from Jest output
+          COVERAGE=$(cat coverage/coverage-summary.json | jq '.total.lines.pct')
+          echo "Line coverage: ${COVERAGE}%"
+
+          # Fail if coverage is below 80%
+          if (( $(echo "$COVERAGE < 80" | bc -l) )); then
+            echo "::error::Coverage ${COVERAGE}% is below required 80% threshold"
+            exit 1
+          fi
+
+          echo "Coverage check passed: ${COVERAGE}% >= 80%"
+
       - name: Upload coverage
         uses: codecov/codecov-action@v3
         with:

@@ -16,6 +16,20 @@ services:
       target: development
     ports:
       - "127.0.0.1:3000:3000"  # Bind to localhost only
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     environment:
       - NODE_ENV=development
       - PORT=3000
@@ -47,6 +61,14 @@ services:
     image: timescale/timescaledb:2.13.1-pg15
     ports:
       - "127.0.0.1:5433:5432"  # Bind to localhost only on 5433 (5432 may be used by local Postgres)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     environment:
       - POSTGRES_USER=${DB_USER:-sentiment}
       - POSTGRES_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
@@ -69,6 +91,14 @@ services:
     image: redis:7-alpine
     ports:
       - "127.0.0.1:6379:6379"  # Bind to localhost only - CRITICAL for cache security
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis-data:/data
@@ -86,6 +116,14 @@ services:
   # ---------------------------------------------------------------------------
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 256M
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -95,11 +133,25 @@ services:
     networks:
       - sentiment-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     ports:
       - "127.0.0.1:9092:9092"  # Bind to localhost only
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -113,10 +165,17 @@ services:
     volumes:
       - kafka-data:/var/lib/kafka/data
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     networks:
       - sentiment-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   # ---------------------------------------------------------------------------
   # Prometheus (Metrics Collection)
@@ -125,6 +184,14 @@ services:
     image: prom/prometheus:v2.47.0
     ports:
       - "127.0.0.1:9090:9090"  # Bind to localhost only
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 256M
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -137,6 +204,11 @@ services:
     networks:
       - sentiment-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # ---------------------------------------------------------------------------
   # Grafana (Dashboards)
@@ -145,6 +217,14 @@ services:
     image: grafana/grafana:10.1.0
     ports:
       - "127.0.0.1:3001:3000"  # Bind to localhost only
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
@@ -154,10 +234,16 @@ services:
       - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
     networks:
       - sentiment-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # ---------------------------------------------------------------------------
   # Kafka UI (Development Tool)

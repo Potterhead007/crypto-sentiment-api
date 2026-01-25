@@ -13,7 +13,17 @@ import { WebSocketServer } from 'ws';
 import Redis from 'ioredis';
 import { Pool } from 'pg';
 import { z } from 'zod';
-import { metricsRegistry, sentimentAnalysisTotal, datasourceHealth } from './metrics';
+import {
+  metricsRegistry,
+  sentimentAnalysisTotal,
+  datasourceHealth,
+  httpRequestsTotal,
+  httpRequestDuration,
+  rateLimitExceededTotal,
+  authFailuresTotal,
+  invalidApiKeyTotal,
+  sentimentLastProcessedTimestamp,
+} from './metrics';
 import config, { validateConfig } from './config/default';
 import { createRateLimitMiddleware, WebSocketConnectionLimiter } from './middleware/rateLimiter';
 import { SessionManager } from './websocket/reconnectionProtocol';
@@ -193,12 +203,43 @@ class Application {
     this.app.use(express.json({ limit: '1mb' }));
     this.app.use(express.urlencoded({ extended: true }));
 
-    // Request ID
+    // Request ID and HTTP metrics
     this.app.use((req: Request, res: Response, next: NextFunction) => {
       req.id = `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       res.setHeader('X-Request-Id', req.id);
+
+      // Track HTTP request metrics
+      const startTime = process.hrtime.bigint();
+      const endpoint = this.normalizeEndpoint(req.path);
+
+      res.on('finish', () => {
+        const durationNs = process.hrtime.bigint() - startTime;
+        const durationSeconds = Number(durationNs) / 1e9;
+
+        httpRequestsTotal.inc({
+          method: req.method,
+          endpoint,
+          status: res.statusCode.toString(),
+        });
+
+        httpRequestDuration.observe(
+          { method: req.method, endpoint },
+          durationSeconds
+        );
+      });
+
       next();
     });
+  }
+
+  /**
+   * Normalizes endpoint paths for metrics (removes IDs to avoid cardinality explosion)
+   */
+  private normalizeEndpoint(path: string): string {
+    return path
+      .replace(/\/v1\/sentiment\/[A-Za-z0-9]+$/, '/v1/sentiment/:asset')
+      .replace(/\/[0-9a-f-]{36}/g, '/:id') // UUIDs
+      .replace(/\/\d+/g, '/:id'); // Numeric IDs
 
     // Rate limiting
     if (config.rateLimiting.enabled) {
@@ -241,12 +282,23 @@ class Application {
           }
 
           // Fallback to anonymous tier for invalid API keys
+          // Track invalid API key attempts if a key was provided but invalid
+          if (apiKey && apiKey.length > 0) {
+            invalidApiKeyTotal.inc({ client_ip: req.ip || 'unknown' });
+            authFailuresTotal.inc({ reason: 'invalid_api_key' });
+          }
           const anonId = `anon_${crypto.createHash('sha256').update(req.ip || '').digest('hex').slice(0, 16)}`;
           return { clientId: anonId, tier: 'anonymous' as const };
         },
         skip: (req: Request) => {
           // Skip rate limiting for health checks
           return req.path === '/health' || req.path === '/health/ready';
+        },
+        onRateLimited: (req: Request, _result) => {
+          // Track rate limit exceeded events
+          const tier = (req as any).clientTier || 'anonymous';
+          const clientId = (req as any).clientId || 'unknown';
+          rateLimitExceededTotal.inc({ tier, client_id: clientId });
         },
       }));
     }
@@ -403,6 +455,13 @@ class Application {
 
         const data = result.rows[0];
         sentimentAnalysisTotal.inc({ source: 'api', asset: asset.toUpperCase() });
+        sentimentLastProcessedTimestamp.set({ asset: asset.toUpperCase() }, Date.now() / 1000);
+
+        // Cache for 30 seconds (real-time data), CDN can cache for 5 minutes
+        res.set({
+          'Cache-Control': 'public, max-age=30, s-maxage=300',
+          'Vary': 'Accept-Encoding',
+        });
 
         res.json({
           asset: asset.toUpperCase(),
