@@ -422,8 +422,6 @@ class Application {
           sentiment_score: number;
           magnitude: number;
           confidence_score: number;
-          confidence_lower: number;
-          confidence_upper: number;
           mention_count: number;
           avg_emotion_fear: number;
           avg_emotion_greed: number;
@@ -431,8 +429,7 @@ class Application {
           avg_emotion_optimism: number;
         }>(
           `SELECT
-            sentiment_score, magnitude, confidence_score,
-            confidence_lower, confidence_upper, mention_count,
+            sentiment_score, magnitude, confidence_score, mention_count,
             avg_emotion_fear, avg_emotion_greed,
             avg_emotion_uncertainty, avg_emotion_optimism
           FROM sentiment_aggregated_1h sa
@@ -463,6 +460,11 @@ class Application {
           'Vary': 'Accept-Encoding',
         });
 
+        // Calculate estimated confidence interval based on confidence score
+        const confidenceMargin = (1 - data.confidence_score) * 0.5;
+        const confidenceLower = Math.max(0, data.confidence_score - confidenceMargin);
+        const confidenceUpper = Math.min(1, data.confidence_score + confidenceMargin);
+
         res.json({
           asset: asset.toUpperCase(),
           timestamp: new Date().toISOString(),
@@ -473,7 +475,7 @@ class Application {
           },
           confidence: {
             level: data.confidence_score,
-            interval_95: [data.confidence_lower, data.confidence_upper],
+            interval_95: [confidenceLower, confidenceUpper],
           },
           emotions: {
             fear: data.avg_emotion_fear,
