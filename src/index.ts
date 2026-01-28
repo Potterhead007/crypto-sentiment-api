@@ -232,6 +232,9 @@ class Application {
 
       next();
     });
+
+    // Rate limiting - MUST be after body parsing middleware
+    this.setupRateLimiting();
   }
 
   /**
@@ -242,68 +245,78 @@ class Application {
       .replace(/\/v1\/sentiment\/[A-Za-z0-9]+$/, '/v1/sentiment/:asset')
       .replace(/\/[0-9a-f-]{36}/g, '/:id') // UUIDs
       .replace(/\/\d+/g, '/:id'); // Numeric IDs
+  }
 
-    // Rate limiting
-    if (config.rateLimiting.enabled) {
-      this.app.use(createRateLimitMiddleware({
-        redis: this.redis,
-        getClientContext: async (req: Request) => {
-          const apiKey = req.headers[config.security.apiKeyHeader.toLowerCase()] as string;
+  /**
+   * Sets up rate limiting middleware with tier-based limits.
+   * Extracts client context from API key and applies appropriate limits.
+   */
+  private setupRateLimiting(): void {
+    if (!config.rateLimiting.enabled) {
+      console.log('[RateLimiting] Disabled via configuration');
+      return;
+    }
 
-          // Anonymous users get restricted anonymous tier
-          if (!apiKey || !apiKey.startsWith('sk_') || apiKey.length < 32) {
-            // Generate unique anonymous ID based on IP hash for per-user limiting
-            const anonId = `anon_${crypto.createHash('sha256').update(req.ip || '').digest('hex').slice(0, 16)}`;
-            return { clientId: anonId, tier: 'anonymous' as const };
-          }
+    console.log('[RateLimiting] Enabling tier-based rate limiting');
 
-          // Hash the API key and lookup in database
-          const keyHash = crypto
-            .createHash('sha256')
-            .update(apiKey)
-            .digest('hex');
-          const keyPrefix = apiKey.substring(0, 12);
+    this.app.use(createRateLimitMiddleware({
+      redis: this.redis,
+      getClientContext: async (req: Request) => {
+        const apiKey = req.headers[config.security.apiKeyHeader.toLowerCase()] as string;
 
-          try {
-            const result = await this.pool.query<{ client_id: string; tier: string; is_active: boolean }>(`
-              SELECT ak.client_id, c.tier, ak.is_active
-              FROM api_keys ak
-              JOIN clients c ON ak.client_id = c.id
-              WHERE ak.key_hash = $1 AND ak.key_prefix = $2 AND ak.is_active = true AND c.is_active = true
-            `, [keyHash, keyPrefix]);
-
-            if (result.rows.length > 0) {
-              const { client_id, tier } = result.rows[0];
-              // Attach client info to request for downstream use
-              (req as any).clientId = client_id;
-              (req as any).clientTier = tier;
-              return { clientId: client_id, tier: tier as 'anonymous' | 'professional' | 'institutional' | 'enterprise' | 'strategic' };
-            }
-          } catch (error) {
-            console.error('Rate limit client lookup error:', (error as Error).message);
-          }
-
-          // Fallback to anonymous tier for invalid API keys
-          // Track invalid API key attempts if a key was provided but invalid
-          if (apiKey && apiKey.length > 0) {
-            invalidApiKeyTotal.inc({ client_ip: req.ip || 'unknown' });
-            authFailuresTotal.inc({ reason: 'invalid_api_key' });
-          }
+        // Anonymous users get restricted anonymous tier
+        if (!apiKey || !apiKey.startsWith('sk_') || apiKey.length < 32) {
+          // Generate unique anonymous ID based on IP hash for per-user limiting
           const anonId = `anon_${crypto.createHash('sha256').update(req.ip || '').digest('hex').slice(0, 16)}`;
           return { clientId: anonId, tier: 'anonymous' as const };
-        },
-        skip: (req: Request) => {
-          // Skip rate limiting for health checks
-          return req.path === '/health' || req.path === '/health/ready';
-        },
-        onRateLimited: (req: Request, _result) => {
-          // Track rate limit exceeded events
-          const tier = (req as any).clientTier || 'anonymous';
-          const clientId = (req as any).clientId || 'unknown';
-          rateLimitExceededTotal.inc({ tier, client_id: clientId });
-        },
-      }));
-    }
+        }
+
+        // Hash the API key and lookup in database
+        const keyHash = crypto
+          .createHash('sha256')
+          .update(apiKey)
+          .digest('hex');
+        const keyPrefix = apiKey.substring(0, 12);
+
+        try {
+          const result = await this.pool.query<{ client_id: string; tier: string; is_active: boolean }>(`
+            SELECT ak.client_id, c.tier, ak.is_active
+            FROM api_keys ak
+            JOIN clients c ON ak.client_id = c.id
+            WHERE ak.key_hash = $1 AND ak.key_prefix = $2 AND ak.is_active = true AND c.is_active = true
+          `, [keyHash, keyPrefix]);
+
+          if (result.rows.length > 0) {
+            const { client_id, tier } = result.rows[0];
+            // Attach client info to request for downstream use
+            (req as any).clientId = client_id;
+            (req as any).clientTier = tier;
+            return { clientId: client_id, tier: tier as 'anonymous' | 'professional' | 'institutional' | 'enterprise' | 'strategic' };
+          }
+        } catch (error) {
+          console.error('Rate limit client lookup error:', (error as Error).message);
+        }
+
+        // Fallback to anonymous tier for invalid API keys
+        // Track invalid API key attempts if a key was provided but invalid
+        if (apiKey && apiKey.length > 0) {
+          invalidApiKeyTotal.inc({ client_ip: req.ip || 'unknown' });
+          authFailuresTotal.inc({ reason: 'invalid_api_key' });
+        }
+        const anonId = `anon_${crypto.createHash('sha256').update(req.ip || '').digest('hex').slice(0, 16)}`;
+        return { clientId: anonId, tier: 'anonymous' as const };
+      },
+      skip: (req: Request) => {
+        // Skip rate limiting for health checks
+        return req.path === '/health' || req.path === '/health/ready';
+      },
+      onRateLimited: (req: Request, _result) => {
+        // Track rate limit exceeded events
+        const tier = (req as any).clientTier || 'anonymous';
+        const clientId = (req as any).clientId || 'unknown';
+        rateLimitExceededTotal.inc({ tier, client_id: clientId });
+      },
+    }));
   }
 
   // ---------------------------------------------------------------------------

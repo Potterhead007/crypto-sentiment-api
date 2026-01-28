@@ -235,12 +235,18 @@ const config: Config = {
       dbUrlConfig?.ssl ||
       process.env.NODE_ENV === 'production';
 
+    // Helper to get non-empty env var (treats empty strings as undefined)
+    const getEnv = (key: string): string | undefined => {
+      const value = process.env[key];
+      return value && value.trim() !== '' ? value : undefined;
+    };
+
     return {
-      host: process.env.DB_HOST || dbUrlConfig?.host || 'localhost',
-      port: parseInt(process.env.DB_PORT || '') || dbUrlConfig?.port || 5432,
-      database: process.env.DB_NAME || dbUrlConfig?.database || 'sentiment',
-      user: process.env.DB_USER || dbUrlConfig?.user || 'sentiment',
-      password: process.env.DB_PASSWORD || dbUrlConfig?.password || '',
+      host: getEnv('DB_HOST') || dbUrlConfig?.host || 'localhost',
+      port: parseInt(getEnv('DB_PORT') || '') || dbUrlConfig?.port || 5432,
+      database: getEnv('DB_NAME') || dbUrlConfig?.database || 'sentiment',
+      user: getEnv('DB_USER') || dbUrlConfig?.user || 'sentiment',
+      password: getEnv('DB_PASSWORD') || dbUrlConfig?.password || '',
       ssl: sslEnabled,
       poolSize: parseInt(process.env.DB_POOL_SIZE || '20'),
       idleTimeout: parseInt(process.env.DB_IDLE_TIMEOUT || '30000'),
