@@ -4,12 +4,12 @@ Institutional-Grade Cryptocurrency Market Sentiment Analysis API targeting hedge
 
 ## Features
 
-- **Real-time Sentiment Analysis** - NLP-powered sentiment scoring for 500+ crypto assets
-- **Multi-source Data Aggregation** - Twitter/X, Reddit, Discord, Telegram, news outlets, on-chain data
+- **Real-time Sentiment Analysis** - NLP-powered sentiment scoring with FinBERT for 500+ crypto assets
+- **Multi-source Data Aggregation** - Twitter/X, Reddit, news outlets, on-chain data with fallback providers
 - **WebSocket Streaming** - Sub-second latency real-time updates with session recovery
 - **Entity Resolution** - Wallet clustering and smart money tracking
-- **Tiered Access** - Professional, Institutional, Enterprise, and Strategic tiers
-- **Enterprise Security** - SAML 2.0/OIDC SSO, SOC 2 compliant audit logging
+- **Tiered Access** - Anonymous, Professional, Institutional, Enterprise, and Strategic tiers
+- **Production Security** - API key authentication, rate limiting, Helmet security headers
 
 ## Quick Start
 
@@ -145,24 +145,27 @@ Environment variables:
 
 ```
 src/
-├── api/
-│   └── schemaVersioning.ts    # API schema versioning with Zod
 ├── config/
-│   └── default.ts             # Application configuration
+│   └── default.ts              # Application configuration with validation
+├── database/
+│   ├── migrations/             # SQL migrations (TimescaleDB optional)
+│   └── migrator.ts             # Migration runner with checksum verification
+├── datasources/
+│   ├── news.ts                 # CryptoPanic & NewsAPI integration
+│   ├── onchain.ts              # Multi-chain blockchain analytics
+│   ├── reddit.ts               # Reddit API sentiment crawling
+│   └── twitter.ts              # Twitter/X with fallback providers
 ├── middleware/
-│   ├── rateLimiter.ts         # Token bucket rate limiting
-│   └── ssoAuth.ts             # SAML 2.0/OIDC authentication
-├── sandbox/
-│   └── sandboxEnvironment.ts  # Synthetic data for testing
+│   └── rateLimiter.ts          # Token bucket rate limiting per tier
+├── nlp/
+│   └── sentimentEngine.ts      # FinBERT NLP with emotion analysis
 ├── services/
-│   ├── auditLogger.ts         # SOC 2 compliant audit logging
-│   ├── dataQualityScoring.ts  # Per-source reliability metrics
-│   ├── entityResolution.ts    # Wallet clustering & smart money
-│   ├── modelVersioning.ts     # NLP model version management
-│   └── statusPage.ts          # Real-time status dashboard
+│   ├── aggregationPipeline.ts  # Real-time sentiment aggregation
+│   └── entityResolution.ts     # Wallet clustering & smart money
 ├── websocket/
-│   └── reconnectionProtocol.ts # Resilient WebSocket with recovery
-└── index.ts                   # Application entry point
+│   └── reconnectionProtocol.ts # Session recovery & heartbeat
+├── metrics.ts                  # Prometheus metrics definitions
+└── index.ts                    # Application entry point
 ```
 
 ## Scripts

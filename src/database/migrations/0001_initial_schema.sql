@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS entities (
   entity_type VARCHAR(50) NOT NULL,
   aliases TEXT[],
   metadata JSONB DEFAULT '{}',
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT entities_name_type_unique UNIQUE (name, entity_type)
 );
 
 CREATE INDEX IF NOT EXISTS idx_entities_name_trgm ON entities USING gin(name gin_trgm_ops);
@@ -353,4 +354,4 @@ INSERT INTO entities (name, entity_type, aliases) VALUES
   ('Compound', 'protocol', ARRAY['Compound Finance']),
   ('SEC', 'regulator', ARRAY['Securities and Exchange Commission']),
   ('CFTC', 'regulator', ARRAY['Commodity Futures Trading Commission'])
-ON CONFLICT DO NOTHING;
+ON CONFLICT (name, entity_type) DO NOTHING;

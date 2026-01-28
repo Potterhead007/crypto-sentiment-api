@@ -822,7 +822,7 @@ class Application {
   private setupWebSocket(): void {
     this.wss.on('connection', async (ws, req) => {
       const clientId = this.extractClientId(req);
-      const tier = 'professional'; // Would be looked up from database
+      const tier = await this.getClientTier(clientId);
 
       // Check connection limit
       const connectionId = `conn_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
@@ -967,6 +967,37 @@ class Application {
       .update(ip + this.ipSalt)
       .digest('hex')
       .slice(0, 16);
+  }
+
+  /**
+   * Looks up client tier from database based on clientId.
+   * Returns 'anonymous' for anonymous clients or on lookup failure.
+   */
+  private async getClientTier(clientId: string): Promise<'anonymous' | 'professional' | 'institutional' | 'enterprise' | 'strategic'> {
+    // Anonymous clients (IP-based IDs) get anonymous tier
+    if (clientId.startsWith('anon_')) {
+      return 'anonymous';
+    }
+
+    try {
+      const result = await this.pool.query<{ tier: string }>(
+        `SELECT c.tier FROM clients c WHERE c.id = $1 AND c.is_active = true`,
+        [clientId]
+      );
+
+      if (result.rows.length > 0) {
+        const tier = result.rows[0].tier;
+        // Validate tier is one of the expected values
+        if (['professional', 'institutional', 'enterprise', 'strategic'].includes(tier)) {
+          return tier as 'professional' | 'institutional' | 'enterprise' | 'strategic';
+        }
+      }
+    } catch (error) {
+      console.error('[WebSocket] Failed to lookup client tier:', (error as Error).message);
+    }
+
+    // Default to anonymous tier for unknown clients
+    return 'anonymous';
   }
 
   // ---------------------------------------------------------------------------

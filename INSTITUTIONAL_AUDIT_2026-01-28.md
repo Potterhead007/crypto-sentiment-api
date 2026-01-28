@@ -191,11 +191,13 @@ private setupMiddleware(): void {
 
 ---
 
-### 2.2 HIGH (3 Findings)
+### 2.2 HIGH (3 Findings) - ALL RESOLVED
 
-#### NEW-HIGH-001: README Documentation Misalignment
+#### NEW-HIGH-001: README Documentation Misalignment [FIXED]
 
 **Location:** `README.md:146-166`
+
+**Status:** RESOLVED (2026-01-28)
 
 **Issue:** README still documents removed modules:
 - `src/api/schemaVersioning.ts` (deleted)
@@ -250,9 +252,11 @@ Remove or update lines 12-13 to reflect current capabilities.
 
 ---
 
-#### NEW-HIGH-002: WebSocket Tier Hardcoded
+#### NEW-HIGH-002: WebSocket Tier Hardcoded [FIXED]
 
-**Location:** `src/index.ts:812`
+**Location:** `src/index.ts:825` (now uses `getClientTier()` method)
+
+**Status:** RESOLVED (2026-01-28)
 
 **Issue:** WebSocket connection handler hardcodes tier as 'professional' instead of looking up from database.
 
@@ -293,9 +297,11 @@ const tier = await this.getClientTier(clientId);
 
 ---
 
-#### NEW-HIGH-003: Entity Seed Data Conflict Resolution
+#### NEW-HIGH-003: Entity Seed Data Conflict Resolution [FIXED]
 
-**Location:** `src/database/migrations/0001_initial_schema.sql:345-356`
+**Location:** `src/database/migrations/0001_initial_schema.sql:345-358`
+
+**Status:** RESOLVED (2026-01-28)
 
 **Issue:** The INSERT for entities uses `ON CONFLICT DO NOTHING` without specifying the conflict target column.
 
