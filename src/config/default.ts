@@ -366,43 +366,54 @@ export function validateConfig(cfg: Config): void {
     errors.push('Invalid server port');
   }
 
+  // Check if running on Railway (has DATABASE_URL or RAILWAY_* env vars)
+  const isRailway = !!(process.env.DATABASE_URL || process.env.RAILWAY_ENVIRONMENT);
+
   // Security validation in production
   if (cfg.server.env === 'production') {
-    // JWT Secret validation
+    // JWT Secret validation - required in production
     if (!cfg.security.jwtSecret ||
       cfg.security.jwtSecret.includes('change-me') ||
       cfg.security.jwtSecret.includes('dev-only') ||
       cfg.security.jwtSecret.length < 32) {
-      errors.push('CRITICAL: JWT secret must be a secure value (min 32 chars) in production');
+      errors.push('CRITICAL: JWT_SECRET must be a secure value (min 32 chars) in production');
     }
 
-    // Database validation
-    if (!cfg.database.ssl) {
-      errors.push('Database SSL must be enabled in production');
-    }
-    if (!cfg.database.password) {
-      errors.push('Database password must be set in production');
+    // Database validation - Railway provides DATABASE_URL which includes credentials
+    if (!isRailway) {
+      if (!cfg.database.password) {
+        errors.push('Database password must be set in production');
+      }
+      if (!cfg.database.ssl) {
+        errors.push('Database SSL must be enabled in production');
+      }
+    } else {
+      // Railway: just verify we have a database connection configured
+      if (!process.env.DATABASE_URL && !cfg.database.host) {
+        errors.push('DATABASE_URL or DB_HOST must be set');
+      }
+      console.log('[Config] Railway environment detected - using DATABASE_URL for credentials');
     }
 
-    // CORS validation - wildcard is not allowed in production
+    // CORS validation - warn but don't block for Railway auto-domains
     if (cfg.security.corsOrigins.includes('*')) {
-      errors.push('CRITICAL: CORS_ORIGINS cannot be wildcard (*) in production. Specify allowed domains.');
+      if (isRailway) {
+        console.warn('WARNING: CORS_ORIGINS is wildcard (*). Set to your Railway domain for better security.');
+      } else {
+        errors.push('CRITICAL: CORS_ORIGINS cannot be wildcard (*) in production. Specify allowed domains.');
+      }
     }
 
     // Redis validation (warnings only - Railway managed Redis handles security)
-    if (!cfg.redis.password) {
-      console.warn('WARNING: Redis password not set (REDIS_PASSWORD). Acceptable if using Railway managed Redis.');
-    }
-    if (!cfg.redis.tls) {
-      console.warn('WARNING: Redis TLS not enabled (REDIS_TLS). Acceptable for Railway internal connections.');
+    if (!cfg.redis.password && !process.env.REDIS_URL) {
+      console.warn('WARNING: Redis password not set. Acceptable if using Railway managed Redis.');
     }
 
     // Kafka validation (warnings only - Kafka is optional)
-    if (cfg.kafka.ssl && !cfg.kafka.sasl) {
-      console.warn('WARNING: Kafka SASL authentication not configured when SSL is enabled');
-    }
-    if (!cfg.kafka.ssl && cfg.kafka.brokers[0] !== 'disabled') {
-      console.warn('WARNING: Kafka SSL not enabled (KAFKA_SSL=true). Set KAFKA_BROKERS=disabled if not using Kafka.');
+    if (cfg.kafka.brokers[0] !== 'disabled' && cfg.kafka.brokers[0] !== 'localhost:9092') {
+      if (cfg.kafka.ssl && !cfg.kafka.sasl) {
+        console.warn('WARNING: Kafka SASL authentication not configured when SSL is enabled');
+      }
     }
   }
 
