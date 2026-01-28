@@ -1,12 +1,21 @@
 -- Migration: Initial Schema
 -- Created: 2024-01-15
--- Description: Initial TimescaleDB schema for Crypto Sentiment API
+-- Description: Initial schema for Crypto Sentiment API
+-- Note: TimescaleDB-specific features are optional and gracefully skipped if unavailable
 
 -- =============================================================================
 -- Extensions
 -- =============================================================================
 
-CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+-- Try to enable TimescaleDB if available, but don't fail if not
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+  RAISE NOTICE 'TimescaleDB extension enabled';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'TimescaleDB not available, using standard PostgreSQL tables';
+END $$;
+
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -44,12 +53,13 @@ CREATE INDEX IF NOT EXISTS idx_entities_name_trgm ON entities USING gin(name gin
 CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
 
 -- =============================================================================
--- Sentiment Data (Hypertables)
+-- Sentiment Data Tables
 -- =============================================================================
 
 -- Raw sentiment data
 CREATE TABLE IF NOT EXISTS sentiment_raw (
-  time TIMESTAMPTZ NOT NULL,
+  id BIGSERIAL,
+  time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   asset_id INTEGER NOT NULL REFERENCES assets(id),
   source VARCHAR(50) NOT NULL,
   sentiment_score FLOAT NOT NULL,
@@ -66,16 +76,26 @@ CREATE TABLE IF NOT EXISTS sentiment_raw (
   entities TEXT[],
   raw_text TEXT,
   metadata JSONB DEFAULT '{}',
-  source_id VARCHAR(200)
+  source_id VARCHAR(200),
+  PRIMARY KEY (id)
 );
 
-SELECT create_hypertable('sentiment_raw', 'time',
-  chunk_time_interval => INTERVAL '1 day',
-  if_not_exists => TRUE
-);
+-- Try to convert to hypertable if TimescaleDB available
+DO $$
+BEGIN
+  PERFORM create_hypertable('sentiment_raw', 'time',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE,
+    migrate_data => TRUE
+  );
+  RAISE NOTICE 'sentiment_raw converted to hypertable';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'Using standard table for sentiment_raw (TimescaleDB not available)';
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_sentiment_raw_asset_time ON sentiment_raw(asset_id, time DESC);
 CREATE INDEX IF NOT EXISTS idx_sentiment_raw_source ON sentiment_raw(source, time DESC);
+CREATE INDEX IF NOT EXISTS idx_sentiment_raw_time ON sentiment_raw(time DESC);
 
 -- Aggregated sentiment (1 minute)
 CREATE TABLE IF NOT EXISTS sentiment_aggregated_1m (
@@ -96,75 +116,65 @@ CREATE TABLE IF NOT EXISTS sentiment_aggregated_1m (
   PRIMARY KEY (time, asset_id, source)
 );
 
-SELECT create_hypertable('sentiment_aggregated_1m', 'time',
-  chunk_time_interval => INTERVAL '1 day',
-  if_not_exists => TRUE
+-- Try to convert to hypertable if TimescaleDB available
+DO $$
+BEGIN
+  PERFORM create_hypertable('sentiment_aggregated_1m', 'time',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE
+  );
+  RAISE NOTICE 'sentiment_aggregated_1m converted to hypertable';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'Using standard table for sentiment_aggregated_1m';
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_sentiment_1m_asset ON sentiment_aggregated_1m(asset_id, time DESC);
+
+-- Aggregated sentiment (1 hour) - standard table instead of continuous aggregate
+CREATE TABLE IF NOT EXISTS sentiment_aggregated_1h (
+  time TIMESTAMPTZ NOT NULL,
+  asset_id INTEGER NOT NULL REFERENCES assets(id),
+  source VARCHAR(50) NOT NULL,
+  sentiment_score FLOAT NOT NULL,
+  magnitude FLOAT NOT NULL DEFAULT 0,
+  confidence_score FLOAT NOT NULL,
+  mention_count INTEGER NOT NULL DEFAULT 0,
+  positive_count INTEGER NOT NULL DEFAULT 0,
+  negative_count INTEGER NOT NULL DEFAULT 0,
+  neutral_count INTEGER NOT NULL DEFAULT 0,
+  avg_emotion_fear FLOAT DEFAULT 0,
+  avg_emotion_greed FLOAT DEFAULT 0,
+  avg_emotion_uncertainty FLOAT DEFAULT 0,
+  avg_emotion_optimism FLOAT DEFAULT 0,
+  PRIMARY KEY (time, asset_id, source)
 );
 
--- =============================================================================
--- Continuous Aggregates
--- =============================================================================
+CREATE INDEX IF NOT EXISTS idx_sentiment_1h_asset ON sentiment_aggregated_1h(asset_id, time DESC);
 
--- Hourly aggregate
-CREATE MATERIALIZED VIEW IF NOT EXISTS sentiment_aggregated_1h
-WITH (timescaledb.continuous) AS
-SELECT
-  time_bucket('1 hour', time) AS time,
-  asset_id,
-  source,
-  AVG(sentiment_score) AS sentiment_score,
-  AVG(magnitude) AS magnitude,
-  AVG(confidence_score) AS confidence_score,
-  SUM(mention_count) AS mention_count,
-  SUM(positive_count) AS positive_count,
-  SUM(negative_count) AS negative_count,
-  SUM(neutral_count) AS neutral_count,
-  AVG(avg_emotion_fear) AS avg_emotion_fear,
-  AVG(avg_emotion_greed) AS avg_emotion_greed,
-  AVG(avg_emotion_uncertainty) AS avg_emotion_uncertainty,
-  AVG(avg_emotion_optimism) AS avg_emotion_optimism
-FROM sentiment_aggregated_1m
-GROUP BY time_bucket('1 hour', time), asset_id, source
-WITH NO DATA;
-
-SELECT add_continuous_aggregate_policy('sentiment_aggregated_1h',
-  start_offset => INTERVAL '3 hours',
-  end_offset => INTERVAL '1 hour',
-  schedule_interval => INTERVAL '1 hour',
-  if_not_exists => TRUE
+-- Aggregated sentiment (1 day) - standard table instead of continuous aggregate
+CREATE TABLE IF NOT EXISTS sentiment_aggregated_1d (
+  time TIMESTAMPTZ NOT NULL,
+  asset_id INTEGER NOT NULL REFERENCES assets(id),
+  source VARCHAR(50) NOT NULL,
+  sentiment_score FLOAT NOT NULL,
+  magnitude FLOAT NOT NULL DEFAULT 0,
+  confidence_score FLOAT NOT NULL,
+  mention_count INTEGER NOT NULL DEFAULT 0,
+  positive_count INTEGER NOT NULL DEFAULT 0,
+  negative_count INTEGER NOT NULL DEFAULT 0,
+  neutral_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (time, asset_id, source)
 );
 
--- Daily aggregate
-CREATE MATERIALIZED VIEW IF NOT EXISTS sentiment_aggregated_1d
-WITH (timescaledb.continuous) AS
-SELECT
-  time_bucket('1 day', time) AS time,
-  asset_id,
-  source,
-  AVG(sentiment_score) AS sentiment_score,
-  AVG(magnitude) AS magnitude,
-  AVG(confidence_score) AS confidence_score,
-  SUM(mention_count) AS mention_count,
-  SUM(positive_count) AS positive_count,
-  SUM(negative_count) AS negative_count,
-  SUM(neutral_count) AS neutral_count
-FROM sentiment_aggregated_1m
-GROUP BY time_bucket('1 day', time), asset_id, source
-WITH NO DATA;
-
-SELECT add_continuous_aggregate_policy('sentiment_aggregated_1d',
-  start_offset => INTERVAL '3 days',
-  end_offset => INTERVAL '1 day',
-  schedule_interval => INTERVAL '1 day',
-  if_not_exists => TRUE
-);
+CREATE INDEX IF NOT EXISTS idx_sentiment_1d_asset ON sentiment_aggregated_1d(asset_id, time DESC);
 
 -- =============================================================================
 -- On-chain Data
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS onchain_flows (
-  time TIMESTAMPTZ NOT NULL,
+  id BIGSERIAL,
+  time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   asset_id INTEGER NOT NULL REFERENCES assets(id),
   chain VARCHAR(50) NOT NULL,
   transaction_type VARCHAR(50) NOT NULL,
@@ -172,16 +182,25 @@ CREATE TABLE IF NOT EXISTS onchain_flows (
   to_address VARCHAR(100),
   value_usd NUMERIC(20, 2),
   sentiment_impact FLOAT,
-  metadata JSONB DEFAULT '{}'
+  metadata JSONB DEFAULT '{}',
+  PRIMARY KEY (id)
 );
 
-SELECT create_hypertable('onchain_flows', 'time',
-  chunk_time_interval => INTERVAL '1 day',
-  if_not_exists => TRUE
-);
+-- Try to convert to hypertable if TimescaleDB available
+DO $$
+BEGIN
+  PERFORM create_hypertable('onchain_flows', 'time',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE,
+    migrate_data => TRUE
+  );
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'Using standard table for onchain_flows';
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_onchain_flows_asset ON onchain_flows(asset_id, time DESC);
 CREATE INDEX IF NOT EXISTS idx_onchain_flows_type ON onchain_flows(transaction_type, time DESC);
+CREATE INDEX IF NOT EXISTS idx_onchain_flows_time ON onchain_flows(time DESC);
 
 -- =============================================================================
 -- Client & Authentication
@@ -234,58 +253,72 @@ CREATE TABLE IF NOT EXISTS audit_log (
   user_agent TEXT,
   request_id UUID,
   metadata JSONB DEFAULT '{}',
-  PRIMARY KEY (time, id)
+  PRIMARY KEY (id)
 );
 
-SELECT create_hypertable('audit_log', 'time',
-  chunk_time_interval => INTERVAL '1 week',
-  if_not_exists => TRUE
-);
+-- Try to convert to hypertable if TimescaleDB available
+DO $$
+BEGIN
+  PERFORM create_hypertable('audit_log', 'time',
+    chunk_time_interval => INTERVAL '1 week',
+    if_not_exists => TRUE,
+    migrate_data => TRUE
+  );
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'Using standard table for audit_log';
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_client ON audit_log(client_id, time DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action, time DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_log_time ON audit_log(time DESC);
 
 -- =============================================================================
--- Compression Policies
+-- TimescaleDB-specific features (only if available)
 -- =============================================================================
 
-ALTER TABLE sentiment_raw SET (
-  timescaledb.compress,
-  timescaledb.compress_segmentby = 'asset_id, source'
-);
+-- Compression policies (TimescaleDB only)
+DO $$
+BEGIN
+  ALTER TABLE sentiment_raw SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'asset_id, source'
+  );
+  PERFORM add_compression_policy('sentiment_raw', INTERVAL '7 days', if_not_exists => TRUE);
+  
+  ALTER TABLE sentiment_aggregated_1m SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'asset_id, source'
+  );
+  PERFORM add_compression_policy('sentiment_aggregated_1m', INTERVAL '30 days', if_not_exists => TRUE);
+  
+  ALTER TABLE onchain_flows SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'asset_id, chain'
+  );
+  PERFORM add_compression_policy('onchain_flows', INTERVAL '7 days', if_not_exists => TRUE);
+  
+  ALTER TABLE audit_log SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'client_id'
+  );
+  PERFORM add_compression_policy('audit_log', INTERVAL '30 days', if_not_exists => TRUE);
+  
+  RAISE NOTICE 'Compression policies applied';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'Compression policies skipped (TimescaleDB not available)';
+END $$;
 
-SELECT add_compression_policy('sentiment_raw', INTERVAL '7 days', if_not_exists => TRUE);
-
-ALTER TABLE sentiment_aggregated_1m SET (
-  timescaledb.compress,
-  timescaledb.compress_segmentby = 'asset_id, source'
-);
-
-SELECT add_compression_policy('sentiment_aggregated_1m', INTERVAL '30 days', if_not_exists => TRUE);
-
-ALTER TABLE onchain_flows SET (
-  timescaledb.compress,
-  timescaledb.compress_segmentby = 'asset_id, chain'
-);
-
-SELECT add_compression_policy('onchain_flows', INTERVAL '7 days', if_not_exists => TRUE);
-
-ALTER TABLE audit_log SET (
-  timescaledb.compress,
-  timescaledb.compress_segmentby = 'client_id'
-);
-
-SELECT add_compression_policy('audit_log', INTERVAL '30 days', if_not_exists => TRUE);
-
--- =============================================================================
--- Retention Policies
--- =============================================================================
-
-SELECT add_retention_policy('sentiment_raw', INTERVAL '90 days', if_not_exists => TRUE);
-SELECT add_retention_policy('sentiment_aggregated_1m', INTERVAL '365 days', if_not_exists => TRUE);
--- SEC Rule 17a-3 compliance: 7 year retention for audit and financial data
-SELECT add_retention_policy('audit_log', INTERVAL '2555 days', if_not_exists => TRUE);
-SELECT add_retention_policy('onchain_flows', INTERVAL '2555 days', if_not_exists => TRUE);
+-- Retention policies (TimescaleDB only)
+DO $$
+BEGIN
+  PERFORM add_retention_policy('sentiment_raw', INTERVAL '90 days', if_not_exists => TRUE);
+  PERFORM add_retention_policy('sentiment_aggregated_1m', INTERVAL '365 days', if_not_exists => TRUE);
+  PERFORM add_retention_policy('audit_log', INTERVAL '2555 days', if_not_exists => TRUE);
+  PERFORM add_retention_policy('onchain_flows', INTERVAL '2555 days', if_not_exists => TRUE);
+  RAISE NOTICE 'Retention policies applied';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'Retention policies skipped (TimescaleDB not available)';
+END $$;
 
 -- =============================================================================
 -- Seed Data
@@ -321,20 +354,3 @@ INSERT INTO entities (name, entity_type, aliases) VALUES
   ('SEC', 'regulator', ARRAY['Securities and Exchange Commission']),
   ('CFTC', 'regulator', ARRAY['Commodity Futures Trading Commission'])
 ON CONFLICT DO NOTHING;
-
--- =============================================================================
--- Grants for Read-Only User (Grafana)
--- =============================================================================
-
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'grafana_reader') THEN
-    CREATE ROLE grafana_reader WITH LOGIN PASSWORD 'changeme';
-  END IF;
-END
-$$;
-
-GRANT CONNECT ON DATABASE sentiment TO grafana_reader;
-GRANT USAGE ON SCHEMA public TO grafana_reader;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana_reader;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO grafana_reader;
