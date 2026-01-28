@@ -97,24 +97,26 @@ class Application {
     this.app = express();
     this.server = createServer(this.app);
 
-    // Initialize Redis
+    // Initialize Redis - support REDIS_URL or individual vars via config
     this.redis = new Redis({
       host: config.redis.host,
       port: config.redis.port,
       password: config.redis.password,
       keyPrefix: config.redis.keyPrefix,
+      tls: config.redis.tls ? { rejectUnauthorized: false } : undefined,
       retryStrategy: (times) => Math.min(times * 50, 2000),
     });
 
-    // Initialize PostgreSQL
+    // Initialize PostgreSQL - support both DATABASE_URL and individual vars via config
     this.pool = new Pool({
-      host: process.env.DB_HOST || 'localhost',
-      port: parseInt(process.env.DB_PORT || '5432'),
-      database: process.env.DB_NAME || 'sentiment',
-      user: process.env.DB_USER || 'sentiment',
-      password: process.env.DB_PASSWORD || '',
-      max: 20,
-      idleTimeoutMillis: 30000,
+      host: config.database.host,
+      port: config.database.port,
+      database: config.database.database,
+      user: config.database.user,
+      password: config.database.password,
+      ssl: config.database.ssl ? { rejectUnauthorized: false } : undefined,
+      max: config.database.poolSize,
+      idleTimeoutMillis: config.database.idleTimeout,
       connectionTimeoutMillis: 5000,
     });
 
@@ -314,16 +316,16 @@ class Application {
       // Security: Only allow internal network access or authenticated Prometheus scrapers
       const clientIp = req.ip || req.socket.remoteAddress || '';
       const isInternal = clientIp.startsWith('10.') ||
-                         clientIp.startsWith('172.16.') ||
-                         clientIp.startsWith('172.17.') ||
-                         clientIp.startsWith('172.18.') ||
-                         clientIp.startsWith('172.19.') ||
-                         clientIp.startsWith('172.2') ||
-                         clientIp.startsWith('172.3') ||
-                         clientIp.startsWith('192.168.') ||
-                         clientIp === '127.0.0.1' ||
-                         clientIp === '::1' ||
-                         clientIp === '::ffff:127.0.0.1';
+        clientIp.startsWith('172.16.') ||
+        clientIp.startsWith('172.17.') ||
+        clientIp.startsWith('172.18.') ||
+        clientIp.startsWith('172.19.') ||
+        clientIp.startsWith('172.2') ||
+        clientIp.startsWith('172.3') ||
+        clientIp.startsWith('192.168.') ||
+        clientIp === '127.0.0.1' ||
+        clientIp === '::1' ||
+        clientIp === '::ffff:127.0.0.1';
 
       // Allow internal IPs or requests with valid metrics token
       const metricsToken = req.headers['x-metrics-token'] as string;

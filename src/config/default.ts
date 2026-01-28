@@ -3,6 +3,80 @@
  * Institutional-Grade Cryptocurrency Market Sentiment Analysis API
  */
 
+import { URL } from 'url';
+
+// =============================================================================
+// ENVIRONMENT VARIABLE HELPERS
+// =============================================================================
+
+/**
+ * Parses a boolean environment variable with robust handling.
+ * Supports: "true", "1", "yes", "on" (case-insensitive)
+ */
+function parseBoolEnv(value: string | undefined, defaultValue: boolean = false): boolean {
+  if (!value) return defaultValue;
+  const normalized = value.trim().toLowerCase();
+  return ['true', '1', 'yes', 'on'].includes(normalized);
+}
+
+/**
+ * Parses DATABASE_URL (Railway format) into individual connection params.
+ * Supports: postgresql://user:pass@host:port/database?sslmode=require
+ */
+function parseDatabaseUrl(databaseUrl: string | undefined): {
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
+  ssl: boolean;
+} | null {
+  if (!databaseUrl) return null;
+
+  try {
+    const url = new URL(databaseUrl);
+    const sslMode = url.searchParams.get('sslmode');
+
+    return {
+      host: url.hostname,
+      port: parseInt(url.port || '5432'),
+      database: url.pathname.slice(1), // Remove leading '/'
+      user: url.username,
+      password: url.password,
+      ssl: sslMode === 'require' || sslMode === 'verify-full' || sslMode === 'verify-ca',
+    };
+  } catch {
+    console.error('Failed to parse DATABASE_URL');
+    return null;
+  }
+}
+
+/**
+ * Parses REDIS_URL into individual connection params.
+ * Supports: redis://[:password@]host:port
+ */
+function parseRedisUrl(redisUrl: string | undefined): {
+  host: string;
+  port: number;
+  password?: string;
+  tls: boolean;
+} | null {
+  if (!redisUrl) return null;
+
+  try {
+    const url = new URL(redisUrl);
+    return {
+      host: url.hostname,
+      port: parseInt(url.port || '6379'),
+      password: url.password || undefined,
+      tls: url.protocol === 'rediss:',
+    };
+  } catch {
+    console.error('Failed to parse REDIS_URL');
+    return null;
+  }
+}
+
 export interface Config {
   server: ServerConfig;
   redis: RedisConfig;
@@ -119,13 +193,18 @@ const config: Config = {
     region: process.env.AWS_REGION || 'us-east-1',
   },
 
-  redis: {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: parseInt(process.env.REDIS_PORT || '6379'),
-    password: process.env.REDIS_PASSWORD,
-    tls: process.env.REDIS_TLS === 'true',
-    keyPrefix: 'sentiment:',
-  },
+  redis: (() => {
+    // Support Railway REDIS_URL or individual env vars
+    const redisUrlConfig = parseRedisUrl(process.env.REDIS_URL);
+
+    return {
+      host: process.env.REDIS_HOST || redisUrlConfig?.host || 'localhost',
+      port: parseInt(process.env.REDIS_PORT || '') || redisUrlConfig?.port || 6379,
+      password: process.env.REDIS_PASSWORD || redisUrlConfig?.password,
+      tls: parseBoolEnv(process.env.REDIS_TLS) || redisUrlConfig?.tls || false,
+      keyPrefix: 'sentiment:',
+    };
+  })(),
 
   kafka: {
     brokers: (process.env.KAFKA_BROKERS || 'localhost:9092').split(','),
@@ -147,16 +226,26 @@ const config: Config = {
     },
   },
 
-  database: {
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '5432'),
-    database: process.env.DB_NAME || 'sentiment',
-    user: process.env.DB_USER || 'sentiment',
-    password: process.env.DB_PASSWORD || '',
-    ssl: process.env.DB_SSL === 'true',
-    poolSize: parseInt(process.env.DB_POOL_SIZE || '20'),
-    idleTimeout: parseInt(process.env.DB_IDLE_TIMEOUT || '30000'),
-  },
+  database: (() => {
+    // Support Railway DATABASE_URL or individual env vars
+    const dbUrlConfig = parseDatabaseUrl(process.env.DATABASE_URL);
+
+    // Determine SSL: explicit DB_SSL takes precedence, then DATABASE_URL, then production default
+    const sslEnabled = parseBoolEnv(process.env.DB_SSL || process.env.DATABASE_SSL) ||
+      dbUrlConfig?.ssl ||
+      process.env.NODE_ENV === 'production';
+
+    return {
+      host: process.env.DB_HOST || dbUrlConfig?.host || 'localhost',
+      port: parseInt(process.env.DB_PORT || '') || dbUrlConfig?.port || 5432,
+      database: process.env.DB_NAME || dbUrlConfig?.database || 'sentiment',
+      user: process.env.DB_USER || dbUrlConfig?.user || 'sentiment',
+      password: process.env.DB_PASSWORD || dbUrlConfig?.password || '',
+      ssl: sslEnabled,
+      poolSize: parseInt(process.env.DB_POOL_SIZE || '20'),
+      idleTimeout: parseInt(process.env.DB_IDLE_TIMEOUT || '30000'),
+    };
+  })(),
 
   rateLimiting: {
     enabled: true,

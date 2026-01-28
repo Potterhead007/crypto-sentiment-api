@@ -7,6 +7,7 @@ import { Pool, PoolClient } from 'pg';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { URL } from 'url';
 
 // =============================================================================
 // Types
@@ -53,7 +54,7 @@ export class DatabaseMigrator {
     if (!/^[a-z_][a-z0-9_]*$/i.test(name)) {
       throw new Error(
         `Invalid schema table name: "${name}". ` +
-          'Must start with letter or underscore and contain only letters, digits, and underscores.'
+        'Must start with letter or underscore and contain only letters, digits, and underscores.'
       );
     }
     // Additional length check (PostgreSQL max identifier is 63 chars)
@@ -66,12 +67,39 @@ export class DatabaseMigrator {
     const schemaTable = config.schemaTable || '_migrations';
     this.validateSchemaTable(schemaTable);
 
+    // Parse DATABASE_URL if provided (Railway format)
+    const dbUrl = process.env.DATABASE_URL;
+    let dbUrlConfig: { host: string; port: number; database: string; user: string; password: string; ssl: boolean } | null = null;
+
+    if (dbUrl) {
+      try {
+        const url = new URL(dbUrl);
+        const sslMode = url.searchParams.get('sslmode');
+        dbUrlConfig = {
+          host: url.hostname,
+          port: parseInt(url.port || '5432'),
+          database: url.pathname.slice(1),
+          user: url.username,
+          password: url.password,
+          ssl: sslMode === 'require' || sslMode === 'verify-full' || sslMode === 'verify-ca',
+        };
+      } catch (e) {
+        console.error('[Migrator] Failed to parse DATABASE_URL:', e);
+      }
+    }
+
+    // Determine SSL: explicit DB_SSL takes precedence, then DATABASE_URL, then production default
+    const sslEnv = process.env.DB_SSL || process.env.DATABASE_SSL;
+    const sslEnabled = (sslEnv && ['true', '1', 'yes', 'on'].includes(sslEnv.trim().toLowerCase())) ||
+      dbUrlConfig?.ssl ||
+      process.env.NODE_ENV === 'production';
+
     this.config = {
-      host: config.host || process.env.DB_HOST || 'localhost',
-      port: config.port || parseInt(process.env.DB_PORT || '5432'),
-      database: config.database || process.env.DB_NAME || 'sentiment',
-      user: config.user || process.env.DB_USER || 'sentiment',
-      password: config.password || process.env.DB_PASSWORD || '',
+      host: config.host || process.env.DB_HOST || dbUrlConfig?.host || 'localhost',
+      port: config.port || parseInt(process.env.DB_PORT || '') || dbUrlConfig?.port || 5432,
+      database: config.database || process.env.DB_NAME || dbUrlConfig?.database || 'sentiment',
+      user: config.user || process.env.DB_USER || dbUrlConfig?.user || 'sentiment',
+      password: config.password || process.env.DB_PASSWORD || dbUrlConfig?.password || '',
       migrationsPath: config.migrationsPath || path.join(__dirname, 'migrations'),
       schemaTable,
     };
@@ -82,6 +110,7 @@ export class DatabaseMigrator {
       database: this.config.database,
       user: this.config.user,
       password: this.config.password,
+      ssl: sslEnabled ? { rejectUnauthorized: false } : undefined,
       max: 5,
       connectionTimeoutMillis: 10000,
     });
@@ -289,7 +318,7 @@ export class DatabaseMigrator {
       } else if (appliedChecksum !== checksum) {
         throw new Error(
           `Migration ${file} has been modified after being applied. ` +
-            `Expected checksum: ${appliedChecksum}, got: ${checksum}`
+          `Expected checksum: ${appliedChecksum}, got: ${checksum}`
         );
       }
     }
