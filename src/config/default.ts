@@ -86,6 +86,7 @@ export interface Config {
   websocket: WebSocketConfig;
   monitoring: MonitoringConfig;
   security: SecurityConfig;
+  documentation: DocumentationConfig;
 }
 
 export interface ServerConfig {
@@ -162,7 +163,17 @@ export interface WebSocketConfig {
   heartbeatInterval: number;
   heartbeatTimeout: number;
   messageBufferDuration: number;
+  maxBufferSize: number;
+  sessionTTL: number;
+  recoveryEndpoint: string;
   compression: boolean;
+}
+
+export interface DocumentationConfig {
+  baseUrl: string;
+  changelogPath: string;
+  rateLimitsPath: string;
+  quotasPath: string;
 }
 
 export interface MonitoringConfig {
@@ -301,6 +312,9 @@ const config: Config = {
     heartbeatInterval: 30000,
     heartbeatTimeout: 10000,
     messageBufferDuration: 300000, // 5 minutes
+    maxBufferSize: parseInt(process.env.WS_MAX_BUFFER_SIZE || '10000'),
+    sessionTTL: parseInt(process.env.WS_SESSION_TTL || '3600'), // 1 hour
+    recoveryEndpoint: '/v1/stream/replay',
     compression: true,
   },
 
@@ -328,6 +342,13 @@ const config: Config = {
       }
       return (origins || 'http://localhost:3000,http://localhost:3001').split(',');
     })(),
+  },
+
+  documentation: {
+    baseUrl: process.env.DOCS_URL || 'https://docs.sentiment-api.io',
+    changelogPath: '/changelog',
+    rateLimitsPath: '/rate-limits',
+    quotasPath: '/quotas',
   },
 };
 

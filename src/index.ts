@@ -3,33 +3,49 @@
  * Institutional-Grade Cryptocurrency Market Sentiment Analysis API
  */
 
+// External packages (alphabetical)
+import compression from 'compression';
+import cors from 'cors';
+import crypto from 'crypto';
 import express, { Express, Request, Response, NextFunction } from 'express';
 import helmet from 'helmet';
-import cors from 'cors';
-import compression from 'compression';
-import crypto from 'crypto';
 import { createServer, Server } from 'http';
-import { WebSocketServer } from 'ws';
 import Redis from 'ioredis';
 import { Pool } from 'pg';
+import { WebSocketServer, WebSocket } from 'ws';
 import { z } from 'zod';
+
+// Internal modules (alphabetical)
+import config, { validateConfig } from './config/default';
+import { DatabaseMigrator } from './database/migrator';
 import {
-  metricsRegistry,
-  sentimentAnalysisTotal,
-  datasourceHealth,
-  httpRequestsTotal,
-  httpRequestDuration,
-  rateLimitExceededTotal,
   authFailuresTotal,
+  datasourceHealth,
+  httpRequestDuration,
+  httpRequestsTotal,
   invalidApiKeyTotal,
+  metricsRegistry,
+  rateLimitExceededTotal,
+  sentimentAnalysisTotal,
   sentimentLastProcessedTimestamp,
 } from './metrics';
-import config, { validateConfig } from './config/default';
 import { createRateLimitMiddleware, WebSocketConnectionLimiter } from './middleware/rateLimiter';
-import { SessionManager } from './websocket/reconnectionProtocol';
 import { SentimentEngine } from './nlp/sentimentEngine';
 import { AggregationPipeline, createPipeline } from './services/aggregationPipeline';
-import { DatabaseMigrator } from './database/migrator';
+import { SessionManager, SessionState } from './websocket/reconnectionProtocol';
+import { IncomingMessage } from 'http';
+
+// =============================================================================
+// TYPE DEFINITIONS
+// =============================================================================
+
+/**
+ * WebSocket message types for client communication
+ */
+interface WebSocketMessage {
+  type: 'subscribe' | 'unsubscribe' | 'heartbeat_ack';
+  assets?: string[];
+}
 
 // =============================================================================
 // INPUT VALIDATION SCHEMAS
@@ -138,9 +154,9 @@ class Application {
     this.sessionManager = new SessionManager({
       redis: this.redis,
       bufferDurationMs: config.websocket.messageBufferDuration,
-      maxBufferSize: 10000,
-      recoveryEndpoint: '/v1/stream/replay',
-      sessionTTL: 3600, // 1 hour
+      maxBufferSize: config.websocket.maxBufferSize,
+      recoveryEndpoint: config.websocket.recoveryEndpoint,
+      sessionTTL: config.websocket.sessionTTL,
     });
 
     // Initialize WebSocket connection limiter
@@ -749,7 +765,7 @@ class Application {
         schema_version: '2.1.0',
         methodology_version: '2.1.0',
         last_updated: '2026-01-19',
-        changelog_url: 'https://docs.sentiment-api.io/changelog',
+        changelog_url: `${config.documentation.baseUrl}${config.documentation.changelogPath}`,
       });
     });
 
@@ -903,24 +919,28 @@ class Application {
     });
   }
 
-  private handleWebSocketMessage(ws: any, session: any, message: any): void {
+  private handleWebSocketMessage(ws: WebSocket, session: SessionState, message: WebSocketMessage): void {
     switch (message.type) {
       case 'subscribe':
-        session.subscriptions = [...new Set([...session.subscriptions, ...message.assets])];
-        ws.send(JSON.stringify({
-          type: 'subscribed',
-          assets: message.assets,
-        }));
+        if (message.assets) {
+          session.subscriptions = [...new Set([...session.subscriptions, ...message.assets])];
+          ws.send(JSON.stringify({
+            type: 'subscribed',
+            assets: message.assets,
+          }));
+        }
         break;
 
       case 'unsubscribe':
-        session.subscriptions = session.subscriptions.filter(
-          (a: string) => !message.assets.includes(a)
-        );
-        ws.send(JSON.stringify({
-          type: 'unsubscribed',
-          assets: message.assets,
-        }));
+        if (message.assets) {
+          session.subscriptions = session.subscriptions.filter(
+            (a: string) => !message.assets!.includes(a)
+          );
+          ws.send(JSON.stringify({
+            type: 'unsubscribed',
+            assets: message.assets,
+          }));
+        }
         break;
 
       case 'heartbeat_ack':
@@ -931,7 +951,7 @@ class Application {
         ws.send(JSON.stringify({
           type: 'error',
           code: 'UNKNOWN_MESSAGE_TYPE',
-          message: `Unknown message type: ${message.type}`,
+          message: `Unknown message type: ${(message as { type: string }).type}`,
         }));
     }
   }
@@ -940,8 +960,8 @@ class Application {
    * Extracts and validates clientId from WebSocket request.
    * Returns hashed IP for anonymous/invalid clientIds to prevent spoofing.
    */
-  private extractClientId(req: any): string {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+  private extractClientId(req: IncomingMessage): string {
+    const url = new URL(req.url || '', `http://${req.headers.host}`);
     const clientId = url.searchParams.get('clientId');
 
     // Validate format: alphanumeric, underscore, hyphen only, max 64 chars
@@ -1007,7 +1027,7 @@ class Application {
           code: 'NOT_FOUND',
           message: `Endpoint ${req.method} ${req.path} not found`,
         },
-        documentation: 'https://docs.sentiment-api.io',
+        documentation: config.documentation.baseUrl,
       });
     });
 

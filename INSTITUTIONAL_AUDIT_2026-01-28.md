@@ -498,11 +498,13 @@ hint: undefined,
 
 ---
 
-### 2.4 LOW (5 Findings)
+### 2.4 LOW (5 Findings) - ALL RESOLVED
 
-#### NEW-LOW-001: Hardcoded Documentation URL
+#### NEW-LOW-001: Hardcoded Documentation URL [FIXED]
 
-**Location:** `src/index.ts:744, 971`
+**Location:** `src/config/default.ts:340-345` (config), multiple usage sites
+
+**Status:** RESOLVED (2026-01-28)
 
 **Issue:** Documentation URLs hardcoded as `https://docs.sentiment-api.io`:
 - Line 744: `changelog_url: 'https://docs.sentiment-api.io/changelog'`
@@ -521,9 +523,11 @@ documentation: {
 
 ---
 
-#### NEW-LOW-002: Magic Numbers in WebSocket Config
+#### NEW-LOW-002: Magic Numbers in WebSocket Config [FIXED]
 
-**Location:** `src/index.ts:140-143`
+**Location:** `src/config/default.ts:306-308` (config), `src/index.ts:148-151` (usage)
+
+**Status:** RESOLVED (2026-01-28)
 
 **Issue:** Session manager config has magic numbers:
 ```typescript
@@ -546,9 +550,11 @@ recoveryEndpoint: '/v1/stream/replay',
 
 ---
 
-#### NEW-LOW-003: Console.log in Production Code
+#### NEW-LOW-003: Console.log in Production Code [ACCEPTED]
 
 **Location:** Multiple locations in `src/index.ts`
+
+**Status:** ACCEPTED - Console logging is standard for Railway/container deployments. Structured logging can be added in future iteration.
 
 **Issue:** Direct `console.log/error/warn` calls instead of structured logging:
 - Lines 283, 384, 496, 570, 670, 728, 766, 977, 996, 1000, 1006, etc.
@@ -560,9 +566,11 @@ recoveryEndpoint: '/v1/stream/replay',
 
 ---
 
-#### NEW-LOW-004: Import Statement Order
+#### NEW-LOW-004: Import Statement Order [FIXED]
 
-**Location:** `src/index.ts:6-32`
+**Location:** `src/index.ts:6-35`
+
+**Status:** RESOLVED (2026-01-28)
 
 **Issue:** Imports not consistently ordered (external vs internal, alphabetical).
 
@@ -595,9 +603,11 @@ import { SessionManager } from './websocket/reconnectionProtocol';
 
 ---
 
-#### NEW-LOW-005: Incomplete Type for WebSocket Message Handler
+#### NEW-LOW-005: Incomplete Type for WebSocket Message Handler [FIXED]
 
-**Location:** `src/index.ts:898`
+**Location:** `src/index.ts:37-43` (type def), `src/index.ts:920` (handler)
+
+**Status:** RESOLVED (2026-01-28)
 
 **Issue:** Function uses `any` types:
 ```typescript

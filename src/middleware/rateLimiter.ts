@@ -7,6 +7,7 @@
 
 import { Request, Response, NextFunction } from 'express';
 import Redis from 'ioredis';
+import appConfig from '../config/default';
 
 // =============================================================================
 // TYPES & INTERFACES
@@ -366,7 +367,7 @@ export function createRateLimitMiddleware(options: RateLimitMiddlewareOptions) {
               retryAfter: rateLimitResult.retryAfter,
             },
           },
-          documentation: 'https://docs.sentiment-api.io/rate-limits',
+          documentation: `${appConfig.documentation.baseUrl}${appConfig.documentation.rateLimitsPath}`,
         });
         return;
       }
@@ -387,7 +388,7 @@ export function createRateLimitMiddleware(options: RateLimitMiddlewareOptions) {
               ).toISOString(),
             },
           },
-          documentation: 'https://docs.sentiment-api.io/quotas',
+          documentation: `${appConfig.documentation.baseUrl}${appConfig.documentation.quotasPath}`,
           upgrade: 'https://sentiment-api.io/pricing',
         });
         return;
@@ -533,7 +534,7 @@ export function buildRateLimitResponse(
       message: messages[code],
       details,
     },
-    documentation: 'https://docs.sentiment-api.io/rate-limits',
+    documentation: `${appConfig.documentation.baseUrl}${appConfig.documentation.rateLimitsPath}`,
     ...(code !== 'RATE_LIMIT_EXCEEDED' && { upgrade: 'https://sentiment-api.io/pricing' }),
   };
 }
