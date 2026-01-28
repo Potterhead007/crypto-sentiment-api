@@ -37,11 +37,8 @@ COPY src ./src
 # Build TypeScript
 RUN npm run build
 
-# Remove dev dependencies
-RUN npm prune --production
-
 # -----------------------------------------------------------------------------
-# Stage 3: Production
+# Stage 3: Production (DEFAULT - must be last)
 # -----------------------------------------------------------------------------
 FROM node:20-alpine AS production
 
@@ -55,7 +52,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Copy built application
+# Copy built application from builder
 COPY --from=builder --chown=sentiment:nodejs /app/dist ./dist
 COPY --from=builder --chown=sentiment:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=sentiment:nodejs /app/package.json ./
@@ -72,30 +69,3 @@ EXPOSE 3000
 
 # Start application
 CMD ["node", "dist/index.js"]
-
-# -----------------------------------------------------------------------------
-# Stage: Development
-# -----------------------------------------------------------------------------
-FROM node:20-alpine AS development
-
-WORKDIR /app
-
-# Install development tools
-RUN apk add --no-cache git
-
-# Copy package files
-COPY package.json package-lock.json ./
-RUN npm ci
-
-# Copy source
-COPY tsconfig.json ./
-COPY src ./src
-
-# Set environment
-ENV NODE_ENV=development
-
-# Expose port
-EXPOSE 3000
-
-# Start with hot reload
-CMD ["npm", "run", "dev"]
