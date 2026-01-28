@@ -333,9 +333,11 @@ Or for assets (which correctly uses `ON CONFLICT (symbol)`), ensure consistency.
 
 ---
 
-### 2.3 MEDIUM (5 Findings)
+### 2.3 MEDIUM (5 Findings) - 4 RESOLVED, 1 DEFERRED
 
-#### NEW-MED-001: Unused Prometheus Metrics (7 of 17)
+#### NEW-MED-001: Unused Prometheus Metrics (7 of 17) [FIXED]
+
+**Status:** RESOLVED (2026-01-28)
 
 **Location:** `src/metrics.ts`
 
@@ -370,9 +372,11 @@ Option B - Wire pipeline metrics in aggregationPipeline.ts.
 
 ---
 
-#### NEW-MED-002: KafkaJS Dependency May Be Unused
+#### NEW-MED-002: KafkaJS Dependency May Be Unused [DEFERRED]
 
 **Location:** `package.json:40`
+
+**Status:** DEFERRED - Requires code refactoring to use dynamic imports in aggregationPipeline.ts
 
 **Issue:** `kafkajs` is a production dependency but Kafka is optional. For Railway deployment (which doesn't use Kafka), this adds 1.2MB to node_modules.
 
@@ -400,9 +404,11 @@ if (config.kafka.brokers[0] !== 'disabled') {
 
 ---
 
-#### NEW-MED-003: CORS Wildcard Only Warns in Production
+#### NEW-MED-003: CORS Wildcard Only Warns in Production [FIXED]
 
 **Location:** `src/config/default.ts:367-369`
+
+**Status:** RESOLVED (2026-01-28)
 
 **Issue:** CORS set to `*` only generates a warning, not an error.
 
@@ -426,9 +432,11 @@ if (cfg.security.corsOrigins.includes('*')) {
 
 ---
 
-#### NEW-MED-004: Missing Pipeline Event Listener Cleanup
+#### NEW-MED-004: Missing Pipeline Event Listener Cleanup [FIXED]
 
-**Location:** `src/index.ts:1024-1028`
+**Location:** `src/index.ts:1068-1075` (setup), `src/index.ts:1100-1103` (cleanup)
+
+**Status:** RESOLVED (2026-01-28)
 
 **Issue:** Pipeline event listener is added but never cleaned up on shutdown.
 
@@ -465,9 +473,11 @@ if (this.pipeline && this.datasourceHealthHandler) {
 
 ---
 
-#### NEW-MED-005: Health Check Exposes Component Hint in Non-Production
+#### NEW-MED-005: Health Check Exposes Component Hint in Non-Production [FIXED]
 
-**Location:** `src/index.ts:394`
+**Location:** `src/index.ts:395-402`
+
+**Status:** RESOLVED (2026-01-28)
 
 **Issue:** Health check failure reveals component information in non-production:
 

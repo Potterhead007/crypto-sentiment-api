@@ -363,9 +363,9 @@ export function validateConfig(cfg: Config): void {
       errors.push('Database password must be set in production');
     }
 
-    // CORS validation (warning only for initial deployment)
+    // CORS validation - wildcard is not allowed in production
     if (cfg.security.corsOrigins.includes('*')) {
-      console.warn('WARNING: CORS origins is set to * in production. Consider restricting to specific domains.');
+      errors.push('CRITICAL: CORS_ORIGINS cannot be wildcard (*) in production. Specify allowed domains.');
     }
 
     // Redis validation (warnings only - Railway managed Redis handles security)

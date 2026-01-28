@@ -87,6 +87,7 @@ class Application {
   private wsConnectionLimiter: WebSocketConnectionLimiter;
   private sentimentEngine: SentimentEngine;
   private pipeline: AggregationPipeline | null = null;
+  private pipelineHealthHandler: ((status: Record<string, boolean>) => void) | null = null;
   private readonly ipSalt: string = crypto.randomBytes(16).toString('hex');
 
   constructor() {
@@ -393,18 +394,12 @@ class Application {
           },
         });
       } catch (error) {
-        // Log full error for debugging but don't expose to client
+        // Log full error for debugging but don't expose details to client
         console.error('Health check failed:', error);
-
-        // Determine which component failed without exposing details
-        const failedComponent = (error as Error).message?.includes('ECONNREFUSED')
-          ? 'connectivity'
-          : 'unknown';
 
         res.status(503).json({
           status: 'not_ready',
           error: 'One or more health checks failed',
-          hint: config.server.env !== 'production' ? failedComponent : undefined,
         });
       }
     });
@@ -1064,12 +1059,13 @@ class Application {
       this.pipeline = createPipeline();
       await this.pipeline.start();
 
-      // Update datasource health metrics
-      this.pipeline.on('datasourceHealth', (status: Record<string, boolean>) => {
+      // Update datasource health metrics - store handler for cleanup
+      this.pipelineHealthHandler = (status: Record<string, boolean>) => {
         for (const [source, healthy] of Object.entries(status)) {
           datasourceHealth.set({ source }, healthy ? 1 : 0);
         }
-      });
+      };
+      this.pipeline.on('datasourceHealth', this.pipelineHealthHandler);
     }
 
     // Start HTTP server
@@ -1095,8 +1091,12 @@ class Application {
   async stop(): Promise<void> {
     console.log('[Application] Shutting down...');
 
-    // Stop pipeline
+    // Stop pipeline and cleanup event listeners
     if (this.pipeline) {
+      if (this.pipelineHealthHandler) {
+        this.pipeline.off('datasourceHealth', this.pipelineHealthHandler);
+        this.pipelineHealthHandler = null;
+      }
       await this.pipeline.stop();
     }
 

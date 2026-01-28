@@ -3,6 +3,7 @@
  * Centralized metrics registry and definitions
  *
  * All metrics referenced in infra/prometheus/rules/alerts.yml are defined here.
+ * Only metrics that are actively updated in the codebase are included.
  */
 
 import { Registry, collectDefaultMetrics, Counter, Gauge, Histogram } from 'prom-client';
@@ -47,30 +48,7 @@ export const sentimentAnalysisTotal = new Counter({
   registers: [metricsRegistry],
 });
 
-// Sentiment score gauge - current sentiment by asset
-export const sentimentScore = new Gauge({
-  name: 'sentiment_score',
-  help: 'Current sentiment score by asset (-1 to 1)',
-  labelNames: ['asset'],
-  registers: [metricsRegistry],
-});
-
-// Sentiment mentions counter
-export const sentimentMentionsTotal = new Counter({
-  name: 'sentiment_mentions_total',
-  help: 'Total mentions processed by asset',
-  labelNames: ['asset'],
-  registers: [metricsRegistry],
-});
-
-// Fear & Greed Index gauge
-export const sentimentFearGreedIndex = new Gauge({
-  name: 'sentiment_fear_greed_index',
-  help: 'Market Fear & Greed Index (0-100)',
-  registers: [metricsRegistry],
-});
-
-// Last processed timestamp gauge
+// Last processed timestamp gauge - updated when sentiment is fetched
 export const sentimentLastProcessedTimestamp = new Gauge({
   name: 'sentiment_last_processed_timestamp',
   help: 'Unix timestamp of last sentiment processing',
@@ -99,14 +77,6 @@ export const datasourceRequestDuration = new Histogram({
   registers: [metricsRegistry],
 });
 
-// Data source rate limit usage gauge (0-1)
-export const datasourceRateLimitUsage = new Gauge({
-  name: 'datasource_rate_limit_usage',
-  help: 'Data source rate limit usage (0-1)',
-  labelNames: ['source'],
-  registers: [metricsRegistry],
-});
-
 // Data source fallback counter
 export const datasourceFallbackActivatedTotal = new Counter({
   name: 'datasource_fallback_activated_total',
@@ -124,40 +94,6 @@ export const rateLimitExceededTotal = new Counter({
   name: 'rate_limit_exceeded_total',
   help: 'Total rate limit exceeded events',
   labelNames: ['tier', 'client_id'],
-  registers: [metricsRegistry],
-});
-
-// Rate limit tokens remaining gauge
-export const rateLimitTokensRemaining = new Gauge({
-  name: 'rate_limit_tokens_remaining',
-  help: 'Remaining rate limit tokens',
-  labelNames: ['tier', 'client_id'],
-  registers: [metricsRegistry],
-});
-
-// Rate limit tokens total gauge
-export const rateLimitTokensTotal = new Gauge({
-  name: 'rate_limit_tokens_total',
-  help: 'Total rate limit tokens allocated',
-  labelNames: ['tier', 'client_id'],
-  registers: [metricsRegistry],
-});
-
-// =============================================================================
-// PIPELINE METRICS
-// =============================================================================
-
-// Pipeline items processed counter
-export const pipelineItemsProcessedTotal = new Counter({
-  name: 'pipeline_items_processed_total',
-  help: 'Total items processed by the pipeline',
-  registers: [metricsRegistry],
-});
-
-// Pipeline items failed counter
-export const pipelineItemsFailedTotal = new Counter({
-  name: 'pipeline_items_failed_total',
-  help: 'Total items that failed processing',
   registers: [metricsRegistry],
 });
 
