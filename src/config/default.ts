@@ -241,11 +241,13 @@ const config: Config = {
     // Support Railway DATABASE_URL or individual env vars
     const dbUrlConfig = parseDatabaseUrl(process.env.DATABASE_URL);
 
-    // Determine SSL: explicit DB_SSL takes precedence, then DATABASE_URL, then production default
-    const sslEnabled = parseBoolEnv(process.env.DB_SSL || process.env.DATABASE_SSL) ||
-      dbUrlConfig?.ssl ||
-      process.env.NODE_ENV === 'production';
-
+        // Determine SSL: explicit DB_SSL takes precedence, then DATABASE_URL, then production default
+        // Check if SSL is explicitly set (even to false) before using production default
+        const explicitSslEnv = process.env.DB_SSL || process.env.DATABASE_SSL;
+        const sslEnabled = explicitSslEnv !== undefined 
+          ? parseBoolEnv(explicitSslEnv) 
+                : (dbUrlConfig?.ssl || process.env.NODE_ENV === 'production');
+    
     // Helper to get non-empty env var (treats empty strings as undefined)
     const getEnv = (key: string): string | undefined => {
       const value = process.env[key];
