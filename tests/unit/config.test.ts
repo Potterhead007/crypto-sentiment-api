@@ -95,6 +95,9 @@ describe('Configuration', () => {
       heartbeatInterval: 30000,
       heartbeatTimeout: 10000,
       messageBufferDuration: 300000,
+      maxBufferSize: 10000,
+      sessionTTL: 3600,
+      recoveryEndpoint: '/v1/stream/replay',
       compression: true,
       ...overrides.websocket,
     },
@@ -112,6 +115,13 @@ describe('Configuration', () => {
       apiKeyHeader: 'X-API-Key',
       corsOrigins: ['http://localhost:3000'],
       ...overrides.security,
+    },
+    documentation: {
+      baseUrl: 'https://docs.sentiment-api.io',
+      changelogPath: '/changelog',
+      rateLimitsPath: '/rate-limits',
+      quotasPath: '/quotas',
+      ...overrides.documentation,
     },
   });
 
@@ -240,17 +250,21 @@ describe('Configuration', () => {
       expect(() => validateConfig(config)).toThrow(/CORS/i);
     });
 
-    it('should reject production config without Redis password', () => {
+    it('should accept production config without Redis password (warning only for Railway)', () => {
+      // Redis password is optional for Railway managed Redis - warns but does not throw
       const config = createProductionConfig({
         redis: {
           ...createProductionConfig().redis,
           password: undefined,
         },
       });
-      expect(() => validateConfig(config)).toThrow(/Redis.*password/i);
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
+      expect(() => validateConfig(config)).not.toThrow();
+      warnSpy.mockRestore();
     });
 
-    it('should warn about production config without Kafka SASL when SSL enabled', () => {
+    it('should accept production config without Kafka SASL when SSL enabled (warning only)', () => {
+      // Kafka SASL is optional - warns but does not throw
       const config = createProductionConfig({
         kafka: {
           ...createProductionConfig().kafka,
@@ -258,20 +272,26 @@ describe('Configuration', () => {
           sasl: undefined,
         },
       });
-      expect(() => validateConfig(config)).toThrow(/SASL/i);
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
+      expect(() => validateConfig(config)).not.toThrow();
+      warnSpy.mockRestore();
     });
 
-    it('should reject production config without Redis TLS', () => {
+    it('should accept production config without Redis TLS (warning only for Railway)', () => {
+      // Redis TLS is optional for Railway managed Redis - warns but does not throw
       const config = createProductionConfig({
         redis: {
           ...createProductionConfig().redis,
           tls: false,
         },
       });
-      expect(() => validateConfig(config)).toThrow(/Redis.*TLS/i);
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
+      expect(() => validateConfig(config)).not.toThrow();
+      warnSpy.mockRestore();
     });
 
-    it('should warn about production config without Kafka SSL', () => {
+    it('should accept production config without Kafka SSL (warning only)', () => {
+      // Kafka SSL is optional - warns but does not throw
       const config = createProductionConfig({
         kafka: {
           ...createProductionConfig().kafka,
@@ -279,7 +299,9 @@ describe('Configuration', () => {
           sasl: undefined,
         },
       });
-      expect(() => validateConfig(config)).toThrow(/Kafka.*SSL/i);
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
+      expect(() => validateConfig(config)).not.toThrow();
+      warnSpy.mockRestore();
     });
 
     it('should reject production config with empty JWT secret', () => {
