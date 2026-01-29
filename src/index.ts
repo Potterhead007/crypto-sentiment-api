@@ -106,6 +106,8 @@ class Application {
   private pipelineHealthHandler: ((status: Record<string, boolean>) => void) | null = null;
   private readonly ipSalt: string = crypto.randomBytes(16).toString('hex');
 
+  private redisAvailable: boolean = false;
+
   constructor() {
     // Validate configuration
     validateConfig(config);
@@ -115,16 +117,50 @@ class Application {
     this.server = createServer(this.app);
 
     // Initialize Redis - support REDIS_URL or individual vars via config
+    // Redis is optional for Railway deployments without Redis service
+    const redisEnabled = process.env.REDIS_URL || process.env.REDIS_HOST;
+
     this.redis = new Redis({
       host: config.redis.host,
       port: config.redis.port,
       password: config.redis.password,
       keyPrefix: config.redis.keyPrefix,
       tls: config.redis.tls ? { rejectUnauthorized: false } : undefined,
-      retryStrategy: (times) => Math.min(times * 50, 2000),
+      retryStrategy: (times) => {
+        if (!redisEnabled) {
+          // Don't retry if Redis was never configured
+          return null;
+        }
+        if (times > 3) {
+          console.warn('[Redis] Max retries exceeded, running without Redis');
+          return null;
+        }
+        return Math.min(times * 50, 2000);
+      },
+      lazyConnect: !redisEnabled, // Don't connect immediately if not configured
+      maxRetriesPerRequest: redisEnabled ? 3 : 0,
     });
 
+    // Track Redis availability
+    this.redis.on('connect', () => {
+      this.redisAvailable = true;
+      console.log('[Redis] Connected successfully');
+    });
+
+    this.redis.on('error', (err) => {
+      if (this.redisAvailable) {
+        console.error('[Redis] Connection error:', err.message);
+      }
+      this.redisAvailable = false;
+    });
+
+    if (!redisEnabled) {
+      console.log('[Redis] Not configured - rate limiting will use in-memory fallback');
+    }
+
     // Initialize PostgreSQL - support both DATABASE_URL and individual vars via config
+    console.log(`[PostgreSQL] Connecting to ${config.database.host}:${config.database.port}/${config.database.database} (SSL: ${config.database.ssl})`);
+
     this.pool = new Pool({
       host: config.database.host,
       port: config.database.port,
@@ -134,7 +170,16 @@ class Application {
       ssl: config.database.ssl ? { rejectUnauthorized: false } : undefined,
       max: config.database.poolSize,
       idleTimeoutMillis: config.database.idleTimeout,
-      connectionTimeoutMillis: 5000,
+      connectionTimeoutMillis: 10000, // Increased for Railway cold starts
+    });
+
+    // Log PostgreSQL connection events
+    this.pool.on('connect', () => {
+      console.log('[PostgreSQL] Client connected to pool');
+    });
+
+    this.pool.on('error', (err) => {
+      console.error('[PostgreSQL] Pool error:', err.message);
     });
 
     // Initialize NLP Sentiment Engine
@@ -1053,6 +1098,22 @@ class Application {
 
   async start(): Promise<void> {
     console.log('[Application] Starting Crypto Sentiment API...');
+    console.log(`[Application] Environment: ${config.server.env}`);
+    console.log(`[Application] Port: ${config.server.port}`);
+
+    // Verify PostgreSQL connection before proceeding
+    console.log('[Application] Verifying database connection...');
+    try {
+      const client = await this.pool.connect();
+      const result = await client.query('SELECT NOW() as time, current_database() as db');
+      console.log(`[Application] Database connected: ${result.rows[0].db} at ${result.rows[0].time}`);
+      client.release();
+    } catch (error) {
+      const err = error as Error;
+      console.error('[Application] Database connection failed:', err.message);
+      console.error('[Application] Check DATABASE_URL or DB_* environment variables');
+      throw new Error(`Database connection failed: ${err.message}`);
+    }
 
     // Run database migrations
     if (process.env.RUN_MIGRATIONS !== 'false') {
@@ -1066,11 +1127,14 @@ class Application {
         if (process.env.REQUIRE_MIGRATIONS !== 'false') {
           throw new Error(`Migration failed: ${migrationResult.error}`);
         }
+        console.warn('[Application] Continuing despite migration failure (REQUIRE_MIGRATIONS=false)');
       } else if (migrationResult.migrationsRun.length > 0) {
         console.log(`[Application] Ran ${migrationResult.migrationsRun.length} migration(s)`);
       } else {
         console.log('[Application] Database is up to date');
       }
+    } else {
+      console.log('[Application] Migrations skipped (RUN_MIGRATIONS=false)');
     }
 
     // Start aggregation pipeline in production

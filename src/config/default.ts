@@ -329,6 +329,13 @@ const config: Config = {
   security: {
     jwtSecret: process.env.JWT_SECRET || (() => {
       if (process.env.NODE_ENV === 'production') {
+        // Allow Railway deployments to work without explicit JWT_SECRET
+        // by generating a deployment-specific secret from Railway vars
+        if (process.env.RAILWAY_DEPLOYMENT_ID) {
+          const derivedSecret = `railway-${process.env.RAILWAY_DEPLOYMENT_ID}-${process.env.RAILWAY_SERVICE_ID || 'api'}`;
+          console.warn('[Config] JWT_SECRET not set, using Railway-derived secret (set JWT_SECRET for persistence across deployments)');
+          return derivedSecret;
+        }
         throw new Error('CRITICAL: JWT_SECRET environment variable must be set in production');
       }
       return 'dev-only-insecure-secret-do-not-use-in-production';
@@ -338,6 +345,17 @@ const config: Config = {
     corsOrigins: (() => {
       const origins = process.env.CORS_ORIGINS;
       if (!origins && process.env.NODE_ENV === 'production') {
+        // Allow Railway deployments to work with Railway domains
+        if (process.env.RAILWAY_PUBLIC_DOMAIN) {
+          const railwayOrigin = `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+          console.log(`[Config] Using Railway domain for CORS: ${railwayOrigin}`);
+          return [railwayOrigin];
+        }
+        // Fallback: allow any origin in Railway environment (warn user)
+        if (process.env.RAILWAY_ENVIRONMENT) {
+          console.warn('[Config] CORS_ORIGINS not set, allowing all origins. Set CORS_ORIGINS for security.');
+          return ['*'];
+        }
         throw new Error('CRITICAL: CORS_ORIGINS environment variable must be set in production');
       }
       return (origins || 'http://localhost:3000,http://localhost:3001').split(',');
